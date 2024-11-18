@@ -1,4 +1,8 @@
+
+
 use merkletree::{Hash, MerkleTree};
+pub mod merkletree;
+pub mod transcript;
 use ark_std::marker::PhantomData;
 use ark_ff::PrimeField;
 use ark_poly::{
@@ -7,6 +11,10 @@ use ark_poly::{
 // Transcript for implementing the Fiat-Shamir transform, which converts an interactive protocol into a non-interactive one
 // by generating challenges deterministically.
 use transcript::Transcript;
+use ark_std::cfg_into_iter;
+use ark_std::ops::Div;
+use ark_std::ops::Mul;
+use ark_std::{rand::Rng, UniformRand};
 
 // rho^-1
 // to determine the size of the evaluation domain in relation to the polynomial degree
@@ -151,5 +159,277 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_LDT<F, P, H> {
     }
 
     // Verify a FRI proof
-    pub fn verify(proof: , degree: usize) -> bool { ... }
+    pub fn verify(proof: LDTProof<F>, degree: usize)  -> bool {
+        // init transcript
+        let mut transcript: Transcript<F> = Transcript::<F>::new();
+
+        if degree != proof.degree {
+            println!("proof degree missmatch");
+            return false;
+        }
+        // TODO check that log_2(evals/2) == degree, etc
+
+        let sub_order = rho1 * degree;
+        let eval_sub_domain: GeneralEvaluationDomain<F> =
+            GeneralEvaluationDomain::new(sub_order).unwrap();
+
+        let (z_pos, z) = transcript.get_challenge_in_eval_domain(eval_sub_domain, b"get z");
+
+        if proof.commitments.len() != (proof.evals.len() / 2) {
+            println!("sho commitments.len() != (evals.len() / 2) - 1");
+            return false;
+        }
+
+        let mut i_z = 0;
+        for i in (0..proof.evals.len()).step_by(2) {
+            let alpha_i = transcript.get_challenge(b"get alpha_i");
+
+            // take f_i(z^2) from evals
+            let z_2i = z.pow([2_u64.pow(i_z as u32)]); // z^{2^i}
+            let fi_z = proof.evals[i];
+            let neg_fi_z = proof.evals[i + 1];
+            // compute f_i^L(z^2), f_i^R(z^2) from the linear combination
+            let L = (fi_z + neg_fi_z) * F::from(2_u32).inverse().unwrap();
+            let R = (fi_z - neg_fi_z) * (F::from(2_u32) * z_2i).inverse().unwrap();
+
+            // compute f_{i+1}(z^2) = f_i^L(z^2) + a_i f_i^R(z^2)
+            let next_fi_z2 = L + alpha_i * R;
+
+            // check: obtained f_{i+1}(z^2) == evals.f_{i+1}(z^2) (=evals[i+2])
+            if i < proof.evals.len() - 2 {
+                if next_fi_z2 != proof.evals[i + 2] {
+                    println!(
+                        "verify step i={}, should f_i+1(z^2) == evals.f_i+1(z^2) (=evals[i+2])",
+                        i
+                    );
+                    return false;
+                }
+            }
+            transcript.add(b"root_i", &proof.commitments[i_z]);
+            transcript.add(b"f_i(z^{2^i})", &proof.evals[i]);
+            transcript.add(b"f_i(-z^{2^i})", &proof.evals[i + 1]);
+
+            // check commitment opening
+            if !MerkleTree::<F, H>::verify(
+                proof.commitments[i_z],
+                F::from(z_pos as u32),
+                proof.evals[i],
+                proof.mtproofs[i_z].clone(),
+            ) {
+                println!("verify step i={}, MT::verify failed", i);
+                return false;
+            }
+
+            // last iteration, check constant values equal to the obtained f_i^L(z^{2^i}),
+            // f_i^R(z^{2^i})
+            if i == proof.evals.len() - 2 {
+                if L != proof.constants[0] {
+                    println!("constant L not equal to the obtained one");
+                    return false;
+                }
+                if R != proof.constants[1] {
+                    println!("constant R not equal to the obtained one");
+                    return false;
+                }
+            }
+            i_z += 1;
+        }
+
+        true
+    }
+}
+pub struct FRI_PCS_Proof<F: PrimeField> {
+  p_proof: LDTProof<F>,
+  g_proof: LDTProof<F>,
+  mtproof_y_index: F, // TODO maybe include index in the mtproof, this would be done at the MerkleTree impl level
+  mtproof_y: Vec<F>,
+}
+
+// FRI_PCS implements the FRI Polynomial Commitment
+pub struct FRI_PCS<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> {
+  _F: PhantomData<F>,
+  _poly: PhantomData<P>,
+  _h: PhantomData<H>,
+}
+
+impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_PCS<F, P, H>
+where
+  for<'a, 'b> &'a P: Div<&'b P, Output = P>,
+{
+  pub fn commit(p: &P) -> F {
+      let (cm, _, _) = Self::tree_from_domain_evals(p);
+      cm
+  }
+
+  pub fn rand_in_eval_domain<R: Rng>(rng: &mut R, deg: usize) -> F {
+      let sub_order = deg * rho1;
+      let eval_domain: GeneralEvaluationDomain<F> =
+          GeneralEvaluationDomain::new(sub_order).unwrap();
+      let size = eval_domain.size();
+      let c = usize::rand(rng);
+      let pos = c % size;
+      eval_domain.element(pos)
+  }
+
+  fn tree_from_domain_evals(p: &P) -> (F, MerkleTree<F, H>, Vec<F>) {
+      let d = p.degree();
+      let sub_order = d * rho1;
+      let eval_sub_domain: GeneralEvaluationDomain<F> =
+          GeneralEvaluationDomain::new(sub_order).unwrap();
+      let subdomain_evaluations: Vec<F> = cfg_into_iter!(0..eval_sub_domain.size())
+          .map(|k| p.evaluate(&eval_sub_domain.element(k)))
+          .collect();
+      let (cm, mt) = MerkleTree::<F, H>::commit(&subdomain_evaluations);
+      (cm, mt, subdomain_evaluations)
+  }
+
+  pub fn open(p: &P, r: F) -> (F, FRI_PCS_Proof<F>) {
+      let y = p.evaluate(&r);
+      let y_poly: P = P::from_coefficients_vec(vec![y]);
+      let mut p_y: P = p.clone();
+      p_y.sub_assign(&y_poly);
+      // p_y = p_y - y_poly;
+      let x_r: P = P::from_coefficients_vec(vec![-r, F::one()]);
+
+      // g(x), quotient polynomial
+      let g: P = p_y.div(&x_r);
+
+      if p.degree() != g.degree() + 1 {
+          panic!("ERR p.deg: {}, g.deg: {}", p.degree(), g.degree()); // TODO err
+      }
+
+      // proof for commitment
+      // reconstruct commitment_mt
+      let (_, commitment_mt, subdomain_evaluations) = Self::tree_from_domain_evals(&p);
+      // find y in subdomain_evaluations
+      let mut y_eval_index: F = F::zero();
+      for i in 0..subdomain_evaluations.len() {
+          if y == subdomain_evaluations[i] {
+              y_eval_index = F::from(i as u64);
+              break;
+          }
+      }
+      let mtproof_y = commitment_mt.open(y_eval_index);
+
+      let p_proof = FRI_LDT::<F, P, H>::prove(p);
+      let g_proof = FRI_LDT::<F, P, H>::prove(&g);
+
+      (
+          y,
+          FRI_PCS_Proof {
+              p_proof,
+              g_proof,
+              mtproof_y_index: y_eval_index,
+              mtproof_y,
+          },
+      )
+  }
+
+  pub fn verify(commitment: F, proof: FRI_PCS_Proof<F>, r: F, y: F) -> bool {
+      let deg_p = proof.p_proof.degree;
+      let deg_g = proof.g_proof.degree;
+      if deg_p != deg_g + 1 {
+          return false;
+      }
+
+      // obtain z from transcript
+      let sub_order = rho1 * proof.p_proof.degree;
+      let eval_sub_domain: GeneralEvaluationDomain<F> =
+          GeneralEvaluationDomain::new(sub_order).unwrap();
+      let mut transcript: Transcript<F> = Transcript::<F>::new();
+      let (_, z) = transcript.get_challenge_in_eval_domain(eval_sub_domain, b"get z");
+
+      // check g(z) == (f(z) - y) * (z-r)^-1
+      let gz = proof.g_proof.evals[0];
+      let fz = proof.p_proof.evals[0];
+      let rhs = (fz - y) / (z - r);
+      if gz != rhs {
+          return false;
+      }
+
+      // check that commitment was for the given y
+      if !MerkleTree::<F, H>::verify(commitment, proof.mtproof_y_index, y, proof.mtproof_y) {
+          return false;
+      }
+
+      // check FRI-LDT for p(x)
+      if !FRI_LDT::<F, P, H>::verify(proof.p_proof, deg_p) {
+          return false;
+      }
+
+      // check FRI-LDT for g(x)
+      if !FRI_LDT::<F, P, H>::verify(proof.g_proof, deg_p - 1) {
+          return false;
+      }
+
+      return true;
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use ark_ff::Field;
+  use ark_std::UniformRand;
+  // pub type Fr = ark_bn254::Fr; // scalar field
+  use ark_bn254::Fr; // scalar field
+  use ark_poly::univariate::DensePolynomial;
+  use ark_poly::Polynomial;
+  use ark_std::log2;
+  use merkletree::Keccak256Hash;
+
+  #[test]
+  fn test_split() {
+      let mut rng = ark_std::test_rng();
+      let deg = 7;
+      let p = DensePolynomial::<Fr>::rand(deg, &mut rng);
+      assert_eq!(p.degree(), deg);
+
+      type FRID = FRI_LDT<Fr, DensePolynomial<Fr>, Keccak256Hash<Fr>>;
+      let (pL, pR) = FRID::split(&p);
+
+      // check that f(z) == fL(x^2) + x * fR(x^2), for a rand z
+      let z = Fr::rand(&mut rng);
+      assert_eq!(
+          p.evaluate(&z),
+          pL.evaluate(&z.square()) + z * pR.evaluate(&z.square())
+      );
+  }
+
+  #[test]
+  fn test_prove() {
+      let deg = 31;
+      let p = DensePolynomial::<Fr>::rand(deg, &mut ark_std::test_rng());
+      assert_eq!(p.degree(), deg);
+      // println!("p {:?}", p);
+
+      type LDT = FRI_LDT<Fr, DensePolynomial<Fr>, Keccak256Hash<Fr>>;
+
+      let proof = LDT::prove(&p);
+      // commitments contains the commitments to each f_0, f_1, ..., f_n, with n=log2(d)
+      assert_eq!(proof.commitments.len(), log2(p.coeffs().len()) as usize);
+      assert_eq!(proof.evals.len(), 2 * log2(p.coeffs().len()) as usize);
+
+      let v = LDT::verify(proof, deg);
+      assert!(v);
+  }
+
+  #[test]
+  fn test_polynomial_commitment() {
+      let deg = 31;
+      let mut rng = ark_std::test_rng();
+      let p = DensePolynomial::<Fr>::rand(deg, &mut rng);
+
+      type PCS = FRI_PCS<Fr, DensePolynomial<Fr>, Keccak256Hash<Fr>>;
+
+      let commitment = PCS::commit(&p);
+
+      // Verifier set challenge in evaluation domain for the degree
+      let r = PCS::rand_in_eval_domain(&mut rng, deg);
+
+      let (claimed_y, proof) = PCS::open(&p, r);
+
+      let v = PCS::verify(commitment, proof, r, claimed_y);
+      assert!(v);
+  }
 }
