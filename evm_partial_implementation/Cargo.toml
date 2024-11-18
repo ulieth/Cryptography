@@ -1,0 +1,10 @@
+[package]
+name = "evm_partial_implementation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hex = "0.4.3"
+num = "0.4.3"
+num-bigint = "0.4.6"
+num-traits = "0.2.19"
