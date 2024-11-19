@@ -10,7 +10,8 @@ use num_bigint::{BigInt, ToBigInt};
 use num_traits::{One, Zero, Signed};
 
 
-
+// modular arithmetic for potentially negative numbers
+// ensures the result is always positive by adding m and taking modulus again
 fn modulus(a: &BigInt, m: &BigInt) -> BigInt {
   ((a % m) + m) % m
 }
@@ -20,7 +21,8 @@ pub fn create(k: u32, n: u32, q: &BigInt, s: &BigInt) -> Vec<[BigInt; 2]> {
   // n: number of shares;
   // q: size of finite field;
   // s: secret to share;
-  // the secret s must be less than the field size q for ensuring that the secret can be represented within the finite field,
+  // the secret s must be less than the field size q for ensuring that the secret
+  // can be represented within the finite field,
   // as all arithmetic operations will be done modulo q;
   if s > q {
       println!("\nERROR: need k<p\n");
@@ -29,7 +31,8 @@ pub fn create(k: u32, n: u32, q: &BigInt, s: &BigInt) -> Vec<[BigInt; 2]> {
   // The secret sharing is based on a polynomial of degree k - 1.
   // The basis polynomial is defined as f(x) = s + a_1x + a_2x^2 + ... + a_k-1x^k-1,
   // where s is a constant term (the secret) and a_1,a_2,...,a_k-1 are randomly generated coefficients.
-  // The polynomial variable will hold the secret and the randomly generated coefficients.
+
+  // `polynomial` variable will hold the secret and the randomly generated coefficients.
   let mut polynomial: Vec<BigInt> = Vec::new();
   polynomial.push(s.clone()); // the secret s is added as the first element
   for _ in 0..k as usize - 1 {
@@ -38,8 +41,10 @@ pub fn create(k: u32, n: u32, q: &BigInt, s: &BigInt) -> Vec<[BigInt; 2]> {
       polynomial.push(a);
   }
 
-  // A vector shares is created to store the calculated share values.
+  // A vector `shares` is created to store the calculated share values.
   let mut shares: Vec<BigInt> = Vec::new();
+  // Now that we have the polynomial, we can pick `n` points from it,
+  // using incremental indexes for the `x` coordinate
   for i in 1..n + 1 {
       let mut share_value: BigInt = Zero::zero();
       let mut x = 0;
@@ -59,6 +64,10 @@ pub fn create(k: u32, n: u32, q: &BigInt, s: &BigInt) -> Vec<[BigInt; 2]> {
   pack_shares(shares)
 }
 
+// Pairs each share value with its x-coordinate (index)
+// These points can be distributed as ‘secret parts’
+// In order to recover the secret, we need at least `k`
+// Then we compute the Lagrange polynomial interpolation to recover the original polynomial
 fn pack_shares(shares: Vec<BigInt>) -> Vec<[BigInt; 2]> {
     let mut packed_shares: Vec<[BigInt; 2]> = Vec::new();
     for i in 0..shares.len() {
@@ -67,7 +76,8 @@ fn pack_shares(shares: Vec<BigInt>) -> Vec<[BigInt; 2]> {
     }
     packed_shares
 }
-
+// Separates packed shares back into values and indices
+// Returns tuple of (values, indices)
 fn unpack_shares(s: Vec<[BigInt; 2]>) -> (Vec<BigInt>, Vec<BigInt>) {
   let mut shares: Vec<BigInt> = Vec::new();
   let mut is: Vec<BigInt> = Vec::new();
@@ -79,10 +89,14 @@ fn unpack_shares(s: Vec<[BigInt; 2]>) -> (Vec<BigInt>, Vec<BigInt>) {
 }
 
 pub fn lagrange_interpolation(q: &BigInt, shares_packed: Vec<[BigInt; 2]>) -> BigInt {
+  // Initializes numerator and denominator for final result
   let mut res_n: BigInt = Zero::zero();
   let mut res_d: BigInt = Zero::zero();
+  // Unpacks shares into values and indices
   let (shares, sh_i) = unpack_shares(shares_packed);
 
+  // Computes Lagrange basis polynomials
+  // For each share `i`, calculates: ∏(j≠i) (x - xⱼ)/(xᵢ - xⱼ)
   for i in 0..shares.len() {
       let mut lagrange_numerator: BigInt = One::one();
       let mut lagrange_denominator: BigInt = One::one();
@@ -94,6 +108,8 @@ pub fn lagrange_interpolation(q: &BigInt, shares_packed: Vec<[BigInt; 2]>) -> Bi
               lagrange_denominator = lagrange_denominator * curr_l_denominator;
           }
       }
+      // Handles division in the finite field
+      // Special case handling when quotient is zero to maintain correctness
       let numerator: BigInt = &shares[i] * &lagrange_numerator;
       // The else blocks ensures the polynomial interpolation
       // maintains the correct contributions despite the zero quotient.
@@ -121,12 +137,15 @@ pub fn lagrange_interpolation(q: &BigInt, shares_packed: Vec<[BigInt; 2]>) -> Bi
   let r = modulus(&modinv_mul, &q);
   r
 }
-
+// Implements Fermat's Little Theorem for modular inverse
+// For prime p, a⁻¹ ≡ aᵖ⁻² (mod p)
 pub fn fermat_inverse(a: &BigInt, p: &BigInt) -> BigInt {
   assert!(p.is_positive() && a.is_positive() && a < p);
   let exp = p - BigInt::from(2); // p - 2
   a.modpow(&exp, p) // Compute a^(p-2) mod p
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -135,6 +154,7 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
+    // Verification of share creation and secret recovery
     fn test_create_and_lagrange_interpolation() {
       // 2 ** 127 - 1
       // the field size
@@ -144,7 +164,7 @@ mod tests {
       // the secret
       let s = BigInt::parse_bytes(b"12345678901234567890123456789012345678", 10).unwrap();
 
-      // with only 3 any shares, we'll be able to reconstrcut the original secret
+      // with only any 3 shares, we'll be able to reconstrcut the original secret
       let shares = create(3, 6, &q, &s);
       println!("shares: {:?}", shares);
 
@@ -159,6 +179,7 @@ mod tests {
   }
 
     #[test]
+    // Testing modular inverse calculations
     fn fermat_modular_inverse() {
         let modul1 = BigInt::from(127u64);
 
