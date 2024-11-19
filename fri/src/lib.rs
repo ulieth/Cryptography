@@ -1,45 +1,49 @@
-
-
 use merkletree::{Hash, MerkleTree};
 pub mod merkletree;
 pub mod transcript;
-use ark_std::marker::PhantomData;
+
 use ark_ff::PrimeField;
+// `ark_poly` handles polynomial operations
+// DensePolynomial stores coefficients in a dense array, making it efficient for most operation
 use ark_poly::{
     univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain,
 };
 // Transcript for implementing the Fiat-Shamir transform, which converts an interactive protocol into a non-interactive one
 // by generating challenges deterministically.
 use transcript::Transcript;
-use ark_std::cfg_into_iter;
-use ark_std::ops::Div;
-use ark_std::ops::Mul;
-use ark_std::{rand::Rng, UniformRand};
+
+use ark_std::{
+  cfg_into_iter,
+  marker::PhantomData, // Zero-sized type for generic parameters
+  ops::{Div, Mul},
+  rand::Rng,
+  UniformRand,
+};
 
 // rho^-1
 // to determine the size of the evaluation domain in relation to the polynomial degree
 // Could be adjusted based on security requirements
-const rho1: usize = 8;
+const RHO_INVERSE: usize = 8;
 
 pub struct LDTProof<F: PrimeField> {
     degree: usize,         // claimed degree of the polynomial
     commitments: Vec<F>,   // Merkle roots for each round. Length equals number of FRI rounds (≈ log₂(degree))
     mtproofs: Vec<Vec<F>>, // Merkle proofs for each round
-    evals: Vec<F>,         // Polynomial evaluations at query points
+    evals: Vec<F>,         // Polynomial evaluations at query points [p(z), p(-z), f_i1(z²), f_i1(-z²)]
     constants: [F; 2],     // Final constant polynomials (fL, fR)
 }
 
 // DenseUVPolynomial is a trait from the ark_poly library
 // that defines the behavior for univariate polynomials stored in dense form.
 // Makes it easier to access coefficients by their position.
-struct FRI_LDT<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> {
+struct FriLdt<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> {
   _f: PhantomData<F>,     // PhantomData is used because the struct doesn't actually store any data of these types,
   _poly: PhantomData<P>,  // but needs to "remember" the types for its methods.
   _h: PhantomData<H>,     // PhantomData fields don't take any space in memory.
 }
 
 // The implementation provides methods for this struct
-impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_LDT<F, P, H> {
+impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FriLdt<F, P, H> {
     // Constructor
     pub fn new() -> Self {
         Self {
@@ -72,11 +76,11 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_LDT<F, P, H> {
         let mut mts: Vec<MerkleTree<F, H>> = Vec::new();    // Merkle trees
 
         // f_0(x) = fL_0(x^2) + x * fR_0(x^2)
-        let mut f_i1 = p.clone();                           // Current polynomial (starts with f_0 = p)
+        let mut f_i1 = p.clone();   // Current polynomial (starts with f_0 = p)
 
         // Set evaluation domain size
         // sub_order = |F_i| = rho^-1 * d
-        let mut sub_order = d * rho1; //
+        let mut sub_order = d * RHO_INVERSE;
         let mut eval_sub_domain: GeneralEvaluationDomain<F> =
             GeneralEvaluationDomain::new(sub_order).unwrap();
 
@@ -87,8 +91,8 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_LDT<F, P, H> {
         // Store evaluations f_i(z^(2^i)), f_i(-z^(2^i))
         let mut evals: Vec<F> = Vec::new();
         let mut mtproofs: Vec<Vec<F>> = Vec::new();  // Merkle proofs
-        let mut fL_i: P = P::from_coefficients_vec(Vec::new());  // Left split
-        let mut fR_i: P = P::from_coefficients_vec(Vec::new());  // Right split
+        let mut f_l_i: P = P::from_coefficients_vec(Vec::new());  // Left split
+        let mut f_r_i: P = P::from_coefficients_vec(Vec::new());  // Right split
         let mut i = 0;
         while f_i1.degree() >= 1 {    // Continue until reaching constant polynomial
             // Store current polynomial
@@ -102,7 +106,18 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_LDT<F, P, H> {
                 .collect();
 
             // Commit to evaluations with Merkle tree
-            let (cm_i, mt_i) = MerkleTree::<F, H>::commit(&subdomain_evaluations);
+            // MerkleTree::commit(&subdomain_evaluations) works like this:
+
+            /*        ROOT (cm_i)
+                   /          \
+                H(1,2)        H(3,4)
+               /     \       /     \
+            H(1)     H(2)  H(3)    H(4)
+             |        |     |        |
+             p0       p1    p3       p4  ...
+            */
+            let (cm_i, mt_i) = MerkleTree::<F, H>::commit(&subdomain_evaluations); // cm_i is the Merkle root
+                                                                                   // mt_i is the entire tree structure
             commitments.push(cm_i);
             mts.push(mt_i);
             transcript.add(b"root_i", &cm_i);
@@ -124,11 +139,11 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_LDT<F, P, H> {
             mtproofs.push(mtproof);
 
             // Split polynomial into even/odd parts
-            (fL_i, fR_i) = Self::split(&f_i1);
+            (f_l_i, f_r_i) = Self::split(&f_i1);
 
-            // Compute next polynomial f_{i+1}(x) = fL_i(x) + alpha_i * fR_i(x)
-            let aux = DensePolynomial::from_coefficients_slice(fR_i.coeffs());
-            f_i1 = fL_i.clone() + P::from_coefficients_slice(aux.mul(alpha_i).coeffs());
+            // Compute next polynomial f_{i+1}(x) = f_l_i(x) + alpha_i * f_r_i(x)
+            let aux = DensePolynomial::from_coefficients_slice(f_r_i.coeffs());
+            f_i1 = f_l_i.clone() + P::from_coefficients_slice(aux.mul(alpha_i).coeffs());
 
             // Prepare for next round
             sub_order = sub_order / 2;
@@ -137,16 +152,16 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_LDT<F, P, H> {
             i += 1;
         }
         // Verify final polynomials are constant
-        if fL_i.coeffs().len() != 1 {
-            panic!("fL_i not constant");
+        if f_l_i.coeffs().len() != 1 {
+            panic!("f_l_i not constant");
         }
-        if fR_i.coeffs().len() != 1 {
-            panic!("fR_i not constant");
+        if f_r_i.coeffs().len() != 1 {
+            panic!("f_r_i not constant");
         }
 
         // Get final constants
-        let constant_fL_l: F = fL_i.coeffs()[0].clone();
-        let constant_fR_l: F = fR_i.coeffs()[0].clone();
+        let constant_f_l_l: F = f_l_i.coeffs()[0].clone();
+        let constant_f_r_l: F = f_r_i.coeffs()[0].clone();
 
         // Return complete proof
         LDTProof {
@@ -154,7 +169,7 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_LDT<F, P, H> {
             commitments,
             mtproofs,
             evals,
-            constants: [constant_fL_l, constant_fR_l],
+            constants: [constant_f_l_l, constant_f_r_l],
         }
     }
 
@@ -169,7 +184,7 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_LDT<F, P, H> {
         }
         // TODO check that log_2(evals/2) == degree, etc
 
-        let sub_order = rho1 * degree;
+        let sub_order = RHO_INVERSE * degree;
         let eval_sub_domain: GeneralEvaluationDomain<F> =
             GeneralEvaluationDomain::new(sub_order).unwrap();
 
@@ -238,21 +253,27 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_LDT<F, P, H> {
         true
     }
 }
-pub struct FRI_PCS_Proof<F: PrimeField> {
+pub struct FriPcsProof<F: PrimeField> {
   p_proof: LDTProof<F>,
   g_proof: LDTProof<F>,
   mtproof_y_index: F, // TODO maybe include index in the mtproof, this would be done at the MerkleTree impl level
   mtproof_y: Vec<F>,
 }
 
-// FRI_PCS implements the FRI Polynomial Commitment
-pub struct FRI_PCS<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> {
-  _F: PhantomData<F>,
-  _poly: PhantomData<P>,
-  _h: PhantomData<H>,
+// FriPcs implements the FRI Polynomial Commitment
+
+pub struct FriPcs<F, P, H>
+where
+    F: PrimeField,
+    P: DenseUVPolynomial<F>,
+    H: Hash<F>,
+{
+    _f: PhantomData<F>,
+    _poly: PhantomData<P>,
+    _h: PhantomData<H>,
 }
 
-impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_PCS<F, P, H>
+impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FriPcs<F, P, H>
 where
   for<'a, 'b> &'a P: Div<&'b P, Output = P>,
 {
@@ -262,7 +283,7 @@ where
   }
 
   pub fn rand_in_eval_domain<R: Rng>(rng: &mut R, deg: usize) -> F {
-      let sub_order = deg * rho1;
+      let sub_order = deg * RHO_INVERSE;
       let eval_domain: GeneralEvaluationDomain<F> =
           GeneralEvaluationDomain::new(sub_order).unwrap();
       let size = eval_domain.size();
@@ -273,7 +294,7 @@ where
 
   fn tree_from_domain_evals(p: &P) -> (F, MerkleTree<F, H>, Vec<F>) {
       let d = p.degree();
-      let sub_order = d * rho1;
+      let sub_order = d * RHO_INVERSE;
       let eval_sub_domain: GeneralEvaluationDomain<F> =
           GeneralEvaluationDomain::new(sub_order).unwrap();
       let subdomain_evaluations: Vec<F> = cfg_into_iter!(0..eval_sub_domain.size())
@@ -283,7 +304,7 @@ where
       (cm, mt, subdomain_evaluations)
   }
 
-  pub fn open(p: &P, r: F) -> (F, FRI_PCS_Proof<F>) {
+  pub fn open(p: &P, r: F) -> (F, FriPcsProof<F>) {
       let y = p.evaluate(&r);
       let y_poly: P = P::from_coefficients_vec(vec![y]);
       let mut p_y: P = p.clone();
@@ -311,12 +332,12 @@ where
       }
       let mtproof_y = commitment_mt.open(y_eval_index);
 
-      let p_proof = FRI_LDT::<F, P, H>::prove(p);
-      let g_proof = FRI_LDT::<F, P, H>::prove(&g);
+      let p_proof = FriLdt::<F, P, H>::prove(p);
+      let g_proof = FriLdt::<F, P, H>::prove(&g);
 
       (
           y,
-          FRI_PCS_Proof {
+          FriPcsProof {
               p_proof,
               g_proof,
               mtproof_y_index: y_eval_index,
@@ -325,7 +346,7 @@ where
       )
   }
 
-  pub fn verify(commitment: F, proof: FRI_PCS_Proof<F>, r: F, y: F) -> bool {
+  pub fn verify(commitment: F, proof: FriPcsProof<F>, r: F, y: F) -> bool {
       let deg_p = proof.p_proof.degree;
       let deg_g = proof.g_proof.degree;
       if deg_p != deg_g + 1 {
@@ -333,7 +354,7 @@ where
       }
 
       // obtain z from transcript
-      let sub_order = rho1 * proof.p_proof.degree;
+      let sub_order = RHO_INVERSE * proof.p_proof.degree;
       let eval_sub_domain: GeneralEvaluationDomain<F> =
           GeneralEvaluationDomain::new(sub_order).unwrap();
       let mut transcript: Transcript<F> = Transcript::<F>::new();
@@ -353,12 +374,12 @@ where
       }
 
       // check FRI-LDT for p(x)
-      if !FRI_LDT::<F, P, H>::verify(proof.p_proof, deg_p) {
+      if !FriLdt::<F, P, H>::verify(proof.p_proof, deg_p) {
           return false;
       }
 
       // check FRI-LDT for g(x)
-      if !FRI_LDT::<F, P, H>::verify(proof.g_proof, deg_p - 1) {
+      if !FriLdt::<F, P, H>::verify(proof.g_proof, deg_p - 1) {
           return false;
       }
 
@@ -370,13 +391,10 @@ where
 mod tests {
   use super::*;
   use ark_ff::Field;
-  use ark_std::UniformRand;
-  // pub type Fr = ark_bn254::Fr; // scalar field
-  use ark_bn254::Fr; // scalar field
-  use ark_poly::univariate::DensePolynomial;
+  use ark_bn254::Fr; //  Implements the BN254 elliptic curve (also known as alt-bn128)
   use ark_poly::Polynomial;
   use ark_std::log2;
-  use merkletree::Keccak256Hash;
+  use crate::merkletree::Keccak256Hash;
 
   #[test]
   fn test_split() {
@@ -385,7 +403,7 @@ mod tests {
       let p = DensePolynomial::<Fr>::rand(deg, &mut rng);
       assert_eq!(p.degree(), deg);
 
-      type FRID = FRI_LDT<Fr, DensePolynomial<Fr>, Keccak256Hash<Fr>>;
+      type FRID = FriLdt<Fr, DensePolynomial<Fr>, Keccak256Hash<Fr>>;
       let (pL, pR) = FRID::split(&p);
 
       // check that f(z) == fL(x^2) + x * fR(x^2), for a rand z
@@ -403,7 +421,7 @@ mod tests {
       assert_eq!(p.degree(), deg);
       // println!("p {:?}", p);
 
-      type LDT = FRI_LDT<Fr, DensePolynomial<Fr>, Keccak256Hash<Fr>>;
+      type LDT = FriLdt<Fr, DensePolynomial<Fr>, Keccak256Hash<Fr>>;
 
       let proof = LDT::prove(&p);
       // commitments contains the commitments to each f_0, f_1, ..., f_n, with n=log2(d)
@@ -420,7 +438,7 @@ mod tests {
       let mut rng = ark_std::test_rng();
       let p = DensePolynomial::<Fr>::rand(deg, &mut rng);
 
-      type PCS = FRI_PCS<Fr, DensePolynomial<Fr>, Keccak256Hash<Fr>>;
+      type PCS = FriPcs<Fr, DensePolynomial<Fr>, Keccak256Hash<Fr>>;
 
       let commitment = PCS::commit(&p);
 
