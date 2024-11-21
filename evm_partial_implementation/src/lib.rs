@@ -1,8 +1,43 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 pub mod opcodes;
 pub mod u256;
+
+// Address and storage key types
+pub type Address = [u8; 20];
+pub type StorageKey = [u8; 32];
+
+// Access list tracking for EIP-2929
+#[derive(Default)]
+pub struct AccessList {
+    addresses: HashSet<Address>,
+    storage: HashMap<Address, HashSet<StorageKey>>,
+}
+
+impl AccessList {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_address_cold(&self, address: &Address) -> bool {
+        !self.addresses.contains(address)
+    }
+
+    pub fn is_storage_cold(&self, address: &Address, key: &StorageKey) -> bool {
+        !self.storage
+            .get(address)
+            .map_or(false, |slots| slots.contains(key))
+    }
+
+    pub fn mark_address_warm(&mut self, address: Address) {
+        self.addresses.insert(address);
+    }
+
+    pub fn mark_storage_warm(&mut self, address: Address, key: StorageKey) {
+        self.storage.entry(address).or_default().insert(key);
+    }
+}
 
 #[derive(Default)]
 pub struct Stack {
@@ -14,7 +49,10 @@ pub struct Stack {
     pub storage: HashMap<[u8; 32], Vec<u8>>,
     pub mem: Vec<u8>,
     pub gas: u64,
+    pub refund: i64,  // Track gas refunds for EIP-3529
     pub opcodes: HashMap<u8, opcodes::Opcode>,
+    pub current_address: Address,  // Track current contract address
+    pub access_list: AccessList,   // Track accessed addresses and slots
 }
 
 impl Stack {
@@ -28,7 +66,10 @@ impl Stack {
             storage: HashMap::new(),
             mem: Vec::new(),
             gas: 10000000000,
+            refund: 0,
             opcodes: HashMap::new(),
+            current_address: [0u8; 20],
+            access_list: AccessList::new(),
         };
         s.opcodes = opcodes::new_opcodes();
         s
@@ -231,6 +272,131 @@ impl Stack {
         }
         Ok(Vec::new())
     }
+    pub fn sstore(&mut self) -> Result<(), String> {
+      let key = self.pop()?;
+      let value = self.pop()?;
+
+      // Check cold/warm access
+      let access_cost = if self.access_list.is_storage_cold(&self.current_address, &key) {
+          self.access_list.mark_storage_warm(self.current_address, key);
+          opcodes::COLD_SLOAD_COST
+      } else {
+          opcodes::WARM_STORAGE_READ_COST
+      };
+
+      self.gas -= access_cost;
+
+      let original = self.storage_committed.get(&key).cloned();
+      let current = self.storage.get(&key).cloned();
+
+      // Calculate gas and refund per EIP-3529
+      let (gas_cost, refund) = self.calculate_sstore_gas_and_refund(
+          &original,
+          &current,
+          &value.to_vec()
+      );
+
+      self.gas -= gas_cost;
+      self.refund += refund;
+
+      // Update storage
+      if value.iter().all(|&x| x == 0) {
+          self.storage.remove(&key);
+      } else {
+          self.storage.insert(key, value.to_vec());
+      }
+
+      Ok(())
+  }
+
+  // Helper for SSTORE gas calculation
+  fn calculate_sstore_gas_and_refund(
+      &self,
+      original: &Option<Vec<u8>>,
+      current: &Option<Vec<u8>>,
+      new: &Vec<u8>
+  ) -> (u64, i64) {
+      let is_zero = |v: &Option<Vec<u8>>| v.as_ref().map_or(true, |x| x.iter().all(|&b| b == 0));
+
+      // No-op case
+      if current.as_ref().map(|v| v == new).unwrap_or(false) {
+          return (opcodes::WARM_STORAGE_READ_COST, 0);
+      }
+
+      // First write to slot
+      if current == original {
+          if is_zero(original) {
+              (opcodes::SSTORE_SET_GAS, 0)
+          } else if new.iter().all(|&x| x == 0) {
+              (opcodes::SSTORE_RESET_GAS, opcodes::SSTORE_CLEARS_SCHEDULE as i64)
+          } else {
+              (opcodes::SSTORE_RESET_GAS, 0)
+          }
+      } else {
+          let mut refund = 0;
+          if !is_zero(original) {
+              if is_zero(current) && !new.iter().all(|&x| x == 0) {
+                  refund -= opcodes::SSTORE_CLEARS_SCHEDULE as i64;
+              }
+              if !is_zero(current) && new.iter().all(|&x| x == 0) {
+                  refund += opcodes::SSTORE_CLEARS_SCHEDULE as i64;
+              }
+          }
+          (opcodes::WARM_STORAGE_READ_COST, refund)
+      }
+  }
+
+  // Calculate final refund (capped at 1/5 of used gas per EIP-3529)
+  pub fn get_final_refund(&self, gas_used: u64) -> u64 {
+      std::cmp::min(self.refund.max(0) as u64, gas_used / 5)
+  }
+
+  pub fn execute(
+      &mut self,
+      code: &[u8],
+      calldata: &[u8],
+      debug: bool,
+  ) -> Result<Vec<u8>, String> {
+      self.pc = 0;
+      self.calldata_i = 0;
+      let l = code.len();
+
+      while self.pc < l {
+          let opcode = code[self.pc];
+          if !self.opcodes.contains_key(&opcode) {
+              return Err(format!("invalid opcode {:x}", opcode));
+          }
+
+          if debug {
+              println!(
+                  "{} (0x{:x}): pc={:?} gas={:?}",
+                  self.opcodes.get(&opcode).unwrap().name,
+                  opcode,
+                  self.pc,
+                  self.gas,
+              );
+              self.print_stack();
+              self.print_memory();
+              self.print_storage();
+              println!();
+          }
+
+          // Get base gas cost
+          let base_gas = self.opcodes.get(&opcode).unwrap().gas;
+
+          match opcode & 0xf0 {
+              // ... [keep existing opcode matching logic]
+              // Just update the gas subtraction at the end:
+              _ => {
+                  return Err(format!("unimplemented {:x}", opcode));
+              }
+          }
+
+          // Subtract base gas cost
+          self.substract_gas(base_gas)?;
+      }
+      Ok(Vec::new())
+  }
 }
 pub fn vec_u8_to_hex(bytes: Vec<u8>) -> String {
     let strs: Vec<String> = bytes.iter().map(|b| format!("{:02X}", b)).collect();
