@@ -1,4 +1,4 @@
-$FRI$ stands for *Fast Reed-Solomon Interactive Oracle Proofs*. FRI is used to prove that a vector commitment is a low-degree polynomial.
+*FRI* stands for *Fast Reed-Solomon Interactive Oracle Proofs*. FRI is used to prove that a vector commitment is a low-degree polynomial.
 ### Why do we need FRI ?
 The naive approach would involve sending all the evaluations at the Merkle tree leaves to the verifier and then letting the verifier interpolate that data. However, this is computationally expensive. FRI provides an alternative to sending all the data for interpolation. It offers a way to convince the verifier that the Merkle commitment corresponds to evaluations of a low-degree polynomial. In the initial commitment, the prover evaluates a polynomial $f(x)$ over a domain $D$, creates a Merkle tree of these evaluations, and sends the root commitment to the verifier.
 FRI works by iteratively "folding" the polynomial into smaller pieces:
@@ -11,8 +11,8 @@ In the first rounds, the prover sends only the Merkle tree root, not all the dat
 The security of FRI relies on the binding property of the Merkle commitments and the soundness of the "folding" operation with random challenges.Verification time is logarithmic in polynomial degree
 
 This code implements FRI (Fast Reed-Solomon Interactive Oracle Proofs). The code implements two main components:
-- FRI Low Degree Testing (FRI_LDT) to prove that a polynomial has a claimed degree.
-- FRI Polynomial Commitment Scheme (FRI_PCS) allows committing to a polynomial and later proving its evaluation at a point.
+- FRI Low Degree Testing to prove that a polynomial has a claimed degree.
+- FRI Polynomial Commitment Scheme allows committing to a polynomial and later proving its evaluation at a point.
 
 ### References
 Paul Gafni, *FRI Mechanics: Folding, Committing, and Batching*;

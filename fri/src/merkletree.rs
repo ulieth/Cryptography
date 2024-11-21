@@ -116,6 +116,8 @@ impl<F: PrimeField, H: Hash<F>> MerkleTree<F, H> {
         return Self::up_from_nodes(next_level_nodes);
     }
     fn get_path(num_levels: u32, value: F) -> Vec<bool> {
+        // to_bytes_le() function converts a number into its little-endian byte representation
+        // used in Merkle trees to determine the path from root to leaf based on the index value's binary representation
         let value_bytes = value.into_bigint().to_bytes_le();
         let mut path = Vec::new();
         for i in 0..num_levels {

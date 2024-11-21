@@ -125,6 +125,7 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FriLdt<F, P, H> {
             // Compute z^(2^i) and -z^(2^i)
             let z_2i = z.pow([2_u64.pow(i as u32)]);
             let neg_z_2i = z_2i.neg();
+            // Evaluate polynomial at these points:
             // Evaluate and store f_i(z^(2^i))
             let eval_i = f_i1.evaluate(&z_2i);
             evals.push(eval_i);
@@ -135,6 +136,8 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FriLdt<F, P, H> {
             transcript.add(b"f_i(-z^{2^i})", &eval_i);
 
             // Generate Merkle proof
+            // z_pos tells us which leaf in the Merkle tree
+            // we need to generate a proof for
             let mtproof = mts[i].open(F::from(z_pos as u32));
             mtproofs.push(mtproof);
 
@@ -191,15 +194,19 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FriLdt<F, P, H> {
         let (z_pos, z) = transcript.get_challenge_in_eval_domain(eval_sub_domain, b"get z");
 
         if proof.commitments.len() != (proof.evals.len() / 2) {
-            println!("sho commitments.len() != (evals.len() / 2) - 1");
-            return false;
+          println!("Error: Number of commitments ({}) does not match number of evaluation pairs ({})",
+          proof.commitments.len(),
+          proof.evals.len() / 2
+          );
+          return false;
         }
 
-        let mut i_z = 0;
+        let mut i_z = 0;  // round counter
+        // Iterate through evaluation pairs (f(z), f(-z)) at each round
         for i in (0..proof.evals.len()).step_by(2) {
+            // Get random challenge for this round from transcript
             let alpha_i = transcript.get_challenge(b"get alpha_i");
-
-            // take f_i(z^2) from evals
+            // Calculate z^(2^i) - the evaluation point for this round
             let z_2i = z.pow([2_u64.pow(i_z as u32)]); // z^{2^i}
             let fi_z = proof.evals[i];
             let neg_fi_z = proof.evals[i + 1];
@@ -207,10 +214,10 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FriLdt<F, P, H> {
             let L = (fi_z + neg_fi_z) * F::from(2_u32).inverse().unwrap();
             let R = (fi_z - neg_fi_z) * (F::from(2_u32) * z_2i).inverse().unwrap();
 
-            // compute f_{i+1}(z^2) = f_i^L(z^2) + a_i f_i^R(z^2)
+            // Next polynomial should be f_{i+1}(z) = L + alpha_i * R
             let next_fi_z2 = L + alpha_i * R;
 
-            // check: obtained f_{i+1}(z^2) == evals.f_{i+1}(z^2) (=evals[i+2])
+            // Verify next evaluation matches the computed value
             if i < proof.evals.len() - 2 {
                 if next_fi_z2 != proof.evals[i + 2] {
                     println!(
@@ -220,23 +227,23 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FriLdt<F, P, H> {
                     return false;
                 }
             }
+            // Add current round's values to transcript for Fiat-Shamir transform
             transcript.add(b"root_i", &proof.commitments[i_z]);
             transcript.add(b"f_i(z^{2^i})", &proof.evals[i]);
             transcript.add(b"f_i(-z^{2^i})", &proof.evals[i + 1]);
 
-            // check commitment opening
+            // Verify Merkle proof that f(z) is committed at z_pos
             if !MerkleTree::<F, H>::verify(
-                proof.commitments[i_z],
-                F::from(z_pos as u32),
-                proof.evals[i],
-                proof.mtproofs[i_z].clone(),
+                proof.commitments[i_z],       // Merkle root
+                F::from(z_pos as u32),        // Position in tree
+                proof.evals[i],               // Value f(z)
+                proof.mtproofs[i_z].clone(),  // Merkle proof
             ) {
                 println!("verify step i={}, MT::verify failed", i);
                 return false;
             }
 
-            // last iteration, check constant values equal to the obtained f_i^L(z^{2^i}),
-            // f_i^R(z^{2^i})
+            // In final round, verify computed L,R match claimed constants
             if i == proof.evals.len() - 2 {
                 if L != proof.constants[0] {
                     println!("constant L not equal to the obtained one");
@@ -275,13 +282,16 @@ where
 
 impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FriPcs<F, P, H>
 where
+  // Allows polynomial division between references
   for<'a, 'b> &'a P: Div<&'b P, Output = P>,
 {
+  // Creates Merkle commitment to polynomial evaluations
+  // Returns root of Merkle tree
   pub fn commit(p: &P) -> F {
       let (cm, _, _) = Self::tree_from_domain_evals(p);
       cm
   }
-
+  // Gets random evaluation point
   pub fn rand_in_eval_domain<R: Rng>(rng: &mut R, deg: usize) -> F {
       let sub_order = deg * RHO_INVERSE;
       let eval_domain: GeneralEvaluationDomain<F> =
@@ -291,7 +301,8 @@ where
       let pos = c % size;
       eval_domain.element(pos)
   }
-
+  // Evaluates polynomial at all domain points
+  // Creates Merkle tree from evaluations
   fn tree_from_domain_evals(p: &P) -> (F, MerkleTree<F, H>, Vec<F>) {
       let d = p.degree();
       let sub_order = d * RHO_INVERSE;
