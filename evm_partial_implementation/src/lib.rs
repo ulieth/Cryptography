@@ -4,13 +4,13 @@ use std::collections::{HashMap, HashSet};
 pub mod opcodes;
 pub mod u256;
 mod types;
-use types::{Address, H256, StorageKey};
+use types::{Address, H256};
 
 // Access list tracking for EIP-2929
 #[derive(Default)]
 pub struct AccessList {
     addresses: HashSet<Address>,
-    storage: HashMap<Address, HashSet<StorageKey>>,
+    storage: HashMap<Address, HashSet<H256>>,
 }
 
 impl AccessList {
@@ -22,7 +22,7 @@ impl AccessList {
         !self.addresses.contains(address)
     }
 
-    pub fn is_storage_cold(&self, address: &Address, key: &StorageKey) -> bool {
+    pub fn is_storage_cold(&self, address: &Address, key: &H256) -> bool {
         !self.storage
             .get(address)
             .map_or(false, |slots| slots.contains(key))
@@ -32,7 +32,7 @@ impl AccessList {
         self.addresses.insert(address);
     }
 
-    pub fn mark_storage_warm(&mut self, address: Address, key: StorageKey) {
+    pub fn mark_storage_warm(&mut self, address: Address, key: H256) {
         self.storage.entry(address).or_default().insert(key);
     }
 }

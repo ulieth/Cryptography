@@ -70,9 +70,10 @@ pub const GSTIPEND: u64 = 2300;
 pub const GSHA3WORD: u64 = 6;
 pub const GECRECOVER: u64 = 3000;
 
+
 // Track accessed addresses and storage slots for EIP-2929
 #[derive(Default)]
-pub struct AccessList<H256> {
+pub struct AccessList {
     addresses: HashSet<Address>,
     storage: HashMap<Address, HashSet<H256>>,
 }
@@ -444,8 +445,8 @@ impl Stack {
       self.push_arbitrary(&r.to_bytes_be());
 
       let n_bytes = &e.to_bytes_be().len();
-      let mut exp_fee = n_bytes * GEXPONENTBYTE;
-      exp_fee += EXP_SUPPLEMENTAL_GAS * n_bytes;
+      let mut exp_fee = (n_bytes * GEXPONENTBYTE as usize) as u64;
+      exp_fee += (EXP_SUPPLEMENTAL_GAS as usize * n_bytes) as u64;
       self.gas -= exp_fee as u64;
       Ok(())
   }
@@ -527,7 +528,7 @@ impl Stack {
   }
   fn spend_gas_data_copy(&mut self, length: usize) {
       let length32 = upper_multiple_of_32(length);
-      self.gas -= ((GCOPY * length32) / 32) as u64;
+      self.gas -= ((GCOPY as usize * length32) / 32) as u64;
   }
   pub fn code_copy(&mut self, code: &[u8]) -> Result<(), String> {
       let dest_offset = u256::u256_to_u64(self.pop()?) as usize;
@@ -556,8 +557,8 @@ impl Stack {
       }
       let old_size = self.mem.len() / 32;
       let new_size = upper_multiple_of_32(start + size) / 32;
-      let old_total_fee = old_size * GMEMORY + old_size.pow(2) / GQUADRATICMEMDENOM;
-      let new_total_fee = new_size * GMEMORY + new_size.pow(2) / GQUADRATICMEMDENOM;
+      let old_total_fee = (old_size * GMEMORY as usize + old_size.pow(2) / GQUADRATICMEMDENOM as usize) as u64;
+      let new_total_fee = (new_size * GMEMORY as usize + new_size.pow(2) / GQUADRATICMEMDENOM as usize) as u64;
       let mem_fee = new_total_fee - old_total_fee;
       self.gas -= mem_fee as u64;
       let mut new_bytes: Vec<u8> = vec![0; (new_size - old_size) * 32];
@@ -579,86 +580,6 @@ impl Stack {
       Ok(())
   }
 
-  // pub fn `sstore` functon implements EIP-1283
-  // EIP-1283 proposes net gas metering changes for SSTORE opcode,
-  // enabling new usages for contract storage, and reducing excessive gas costs
-  pub fn sstore(&mut self) -> Result<(), String> {
-      // https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1283.md
-      // Replace SSTORE opcode gas cost calculation (including refunds) with the following logic:
-      // 1. If current value equals new value (this is a no-op), 200 gas is deducted.
-      // 2. If current value does not equal new value
-      //   2.1. If original value equals current value (this storage slot has not been changed by the current execution context)
-      //     2.1.1. If original value is 0, 20000 gas is deducted.
-      // 	   2.1.2. Otherwise, 5000 gas is deducted. If new value is 0, add 15000 gas to refund counter.
-      // 	2.2. If original value does not equal current value (this storage slot is dirty), 200 gas is deducted. Apply both of the following clauses.
-      // 	  2.2.1. If original value is not 0
-      //       2.2.1.1. If current value is 0 (also means that new value is not 0), remove 15000 gas from refund counter. We can prove that refund counter will never go below 0.
-      //       2.2.1.2. If new value is 0 (also means that current value is not 0), add 15000 gas to refund counter.
-      // 	  2.2.2. If original value equals new value (this storage slot is reset)
-      //       2.2.2.1. If original value is 0, add 19800 gas to refund counter.
-      // 	     2.2.2.2. Otherwise, add 4800 gas to refund counter.
-
-      // Handles storage changes with three key values:
-      // - Original value: Value at the start of the transaction (if reversion happens)
-      // - Current value: Value before this SSTORE operation
-      // - New value: Value being written by this SSTORE operation
-      let empty: Vec<u8> = Vec::new();
-      let key = self.pop()?;
-      let value = self.pop()?;
-      let original = match self.storage_committed.get(&key) {
-          Some(v) => v.clone(),
-          None => empty.clone(),
-      };
-
-      let current = match self.storage.get(&key) {
-          Some(v) => v.clone(),
-          None => {
-              self.gas -= 2100; // Cold storage access cost
-              empty.clone()
-          }
-      };
-      // Case 1: No-op case - current value equals new value
-      // This is the cheapest operation as no storage change is needed
-      if current == value {
-          self.gas -= NETSSTORENOOPGAS; // 200 gas
-          return Ok(());
-      }
-      // Case 2: Fresh slot case - original value equals current value
-      // This means this storage slot has not been changed in current execution
-      if original == current {
-          if original.is_empty() {
-              self.gas -= NETSSTOREINITGAS; // 20,000 gas
-              return Ok(());
-          }
-          // Fresh slot being set from non-0 to 0, add refund
-          if value.is_empty() {
-              self.gas += NETSSTORECLEARREFUND;
-          }
-          self.gas -= NETSSTORECLEANGAS;
-          return Ok(());
-      }
-      // Case 3: Dirty slot case - original value does not equal current value
-      // Handle refunds for original non-zero cases
-      if !original.is_empty() {
-          if current.is_empty() {
-              self.gas -= NETSSTORECLEARREFUND;
-          } else if value.is_empty() {
-              self.gas += NETSSTORECLEARREFUND;
-          }
-      }
-      // Case 4: Reset case - original value equals new value
-      // Provide additional refunds when a dirty slot is reset to its original value
-      if original == value {
-          if original.is_empty() {
-              self.gas += NETSSTORERESETCLEARREFUND;
-          } else {
-              self.gas += NETSSTORERESETREFUND;
-          }
-      }
-      self.gas -= NETSSTOREDIRTYGAS;
-      self.storage.insert(key, value.to_vec());
-      Ok(())
-  }
 
   pub fn jump(&mut self, code: &[u8]) -> Result<(), String> {
       // TODO that jump destination is valid
