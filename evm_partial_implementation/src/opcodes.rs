@@ -277,9 +277,6 @@ impl Stack {
         Ok(())
     }
 
-
-
-
   pub fn add(&mut self) -> Result<(), String> {
       let b0 = BigUint::from_bytes_be(&self.pop()?[..]);
       let b1 = BigUint::from_bytes_be(&self.pop()?[..]);
