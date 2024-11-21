@@ -18,6 +18,7 @@
 
 use super::*;
 use std::collections::{HashMap, HashSet};
+use crate::types::{Address, H256};
 use num_bigint::BigUint;
 use num_traits::identities::Zero;
 // Constants representing gas prices for various operations in the Ethereum Virtual Machine (EVM).
@@ -71,7 +72,7 @@ pub const GECRECOVER: u64 = 3000;
 
 // Track accessed addresses and storage slots for EIP-2929
 #[derive(Default)]
-pub struct AccessList {
+pub struct AccessList<H256> {
     addresses: HashSet<Address>,
     storage: HashMap<Address, HashSet<H256>>,
 }

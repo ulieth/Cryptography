@@ -3,10 +3,8 @@
 use std::collections::{HashMap, HashSet};
 pub mod opcodes;
 pub mod u256;
-
-// Address and storage key types
-pub type Address = [u8; 20];
-pub type StorageKey = [u8; 32];
+mod types;
+use types::{Address, H256, StorageKey};
 
 // Access list tracking for EIP-2929
 #[derive(Default)]
