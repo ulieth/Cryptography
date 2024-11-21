@@ -165,6 +165,10 @@ impl Stack {
                 self.print_storage();
                 println!();
             }
+
+            // Get base gas cost
+            let base_gas = self.opcodes.get(&opcode).unwrap().gas;
+
             match opcode & 0xf0 {
                 0x00 => {
                     // arithmetic
@@ -266,10 +270,12 @@ impl Stack {
                     return Err(format!("unimplemented {:x}", opcode));
                 }
             }
-            self.substract_gas(self.opcodes.get(&opcode).unwrap().gas)?;
+            // Subtract base gas cost
+            self.substract_gas(base_gas)?;
         }
         Ok(Vec::new())
     }
+
     pub fn sstore(&mut self) -> Result<(), String> {
       let key = self.pop()?;
       let value = self.pop()?;
@@ -349,52 +355,7 @@ impl Stack {
       std::cmp::min(self.refund.max(0) as u64, gas_used / 5)
   }
 
-  pub fn execute(
-      &mut self,
-      code: &[u8],
-      calldata: &[u8],
-      debug: bool,
-  ) -> Result<Vec<u8>, String> {
-      self.pc = 0;
-      self.calldata_i = 0;
-      let l = code.len();
 
-      while self.pc < l {
-          let opcode = code[self.pc];
-          if !self.opcodes.contains_key(&opcode) {
-              return Err(format!("invalid opcode {:x}", opcode));
-          }
-
-          if debug {
-              println!(
-                  "{} (0x{:x}): pc={:?} gas={:?}",
-                  self.opcodes.get(&opcode).unwrap().name,
-                  opcode,
-                  self.pc,
-                  self.gas,
-              );
-              self.print_stack();
-              self.print_memory();
-              self.print_storage();
-              println!();
-          }
-
-          // Get base gas cost
-          let base_gas = self.opcodes.get(&opcode).unwrap().gas;
-
-          match opcode & 0xf0 {
-              // ... [keep existing opcode matching logic]
-              // Just update the gas subtraction at the end:
-              _ => {
-                  return Err(format!("unimplemented {:x}", opcode));
-              }
-          }
-
-          // Subtract base gas cost
-          self.substract_gas(base_gas)?;
-      }
-      Ok(Vec::new())
-  }
 }
 pub fn vec_u8_to_hex(bytes: Vec<u8>) -> String {
     let strs: Vec<String> = bytes.iter().map(|b| format!("{:02X}", b)).collect();
