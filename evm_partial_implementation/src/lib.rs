@@ -97,8 +97,8 @@ impl Stack {
             }
         }
     }
-    pub fn push(&mut self, b: [u8; 32]) {
-        self.stack.push(b);
+    pub fn push(&mut self, value: [u8; 32]) {
+        self.stack.push(H256::from(value));
     }
     // push_arbitrary performs a push, but first converting the arbitrary-length
     // input into a 32 byte array
@@ -117,10 +117,9 @@ impl Stack {
         self.stack[l - 1] = d;
     }
     pub fn pop(&mut self) -> Result<[u8; 32], String> {
-        match self.stack.pop() {
-            Some(x) => Ok(x),
-            None => Err("pop err".to_string()), // WIP
-        }
+        self.stack.pop()
+            .map(|h| h.into())
+            .ok_or_else(|| "pop err".to_string())
     }
     pub fn peek(&mut self) -> Result<[u8; 32], String> {
         if self.stack.is_empty() {
@@ -277,7 +276,7 @@ impl Stack {
     }
 
     pub fn sstore(&mut self) -> Result<(), String> {
-      let key = self.pop()?;
+      let key: H256 = self.pop()?.into();
       let value = self.pop()?;
 
       // Check cold/warm access
@@ -309,7 +308,6 @@ impl Stack {
       } else {
           self.storage.insert(key, value.to_vec());
       }
-
       Ok(())
   }
 
