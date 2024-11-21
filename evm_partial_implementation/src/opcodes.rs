@@ -17,7 +17,7 @@
 /// For example, operations in Wzero (e.g., STOP, RETURN, REVERT) have lower costs, while those in Whigh (e.g., JUMPI) have higher costs.
 
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use num_bigint::BigUint;
 use num_traits::identities::Zero;
 // Constants representing gas prices for various operations in the Ethereum Virtual Machine (EVM).
@@ -36,9 +36,11 @@ pub const GQUADRATICMEMDENOM: u64 = 512;
 // https://github.com/ethereum/EIPs/blob/master/EIPS/eip-3529.md
 pub const COLD_SLOAD_COST: u64 = 2100;
 pub const WARM_STORAGE_READ_COST: u64 = 100;
+pub const COLD_ACCOUNT_ACCESS_COST: u64 = 2600;
+pub const WARM_ACCOUNT_ACCESS_COST: u64 = 100;
 pub const SSTORE_SET_GAS: u64 = 20000;
 pub const SSTORE_RESET_GAS: u64 = 2900;
-pub const SSTORE_CLEARS_SCHEDULE: u64 = 4800;
+pub const SSTORE_CLEARS_SCHEDULE: u64 = 4800; // EIP-3529 reduced refund
 
 // Memory and copy costs
 pub const GCOPY: u64 = 3;
@@ -67,6 +69,36 @@ pub const GSTIPEND: u64 = 2300;
 pub const GSHA3WORD: u64 = 6;
 pub const GECRECOVER: u64 = 3000;
 
+// Track accessed addresses and storage slots for EIP-2929
+#[derive(Default)]
+pub struct AccessList {
+    addresses: HashSet<Address>,
+    storage: HashMap<Address, HashSet<H256>>,
+}
+
+impl AccessList {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_cold_address(&self, address: &Address) -> bool {
+        !self.addresses.contains(address)
+    }
+
+    pub fn is_cold_slot(&self, address: &Address, slot: &H256) -> bool {
+        !self.storage
+            .get(address)
+            .map_or(false, |slots| slots.contains(slot))
+    }
+
+    pub fn mark_address_warm(&mut self, address: Address) {
+        self.addresses.insert(address);
+    }
+
+    pub fn mark_slot_warm(&mut self, address: Address, slot: H256) {
+        self.storage.entry(address).or_default().insert(slot);
+    }
+}
 
 // Structure representing an opcode with its attributes,
 /// - `name`: The name of the opcode.
@@ -169,9 +201,7 @@ pub fn new_opcodes() -> HashMap<u8, Opcode> {
     opcodes.insert(0x59, new_opcode("MSIZE", 0, 1, 2));
     opcodes.insert(0x5a, new_opcode("GAS", 0, 1, 2));
     opcodes.insert(0x5b, new_opcode("JUMPDEST", 0, 0, 1));
-    opcodes.insert(0x5c, new_opcode("TLOAD", 1, 1, 100));
-    opcodes.insert(0x5d, new_opcode("TSTORE", 2, 0, 100));
-    opcodes.insert(0x5e, new_opcode("MCOOPY", 3, 0, 3));
+    opcodes.insert(0x5e, new_opcode("MCOPY", 3, 0, 3));
 
     // 5f, 60s & 70s: Push Operations
     opcodes.insert(0x5f, new_opcode("PUSH0", 0, 1, 2));
@@ -194,7 +224,7 @@ pub fn new_opcodes() -> HashMap<u8, Opcode> {
     opcodes.insert(0xf2, new_opcode("CALLCODE", 7, 1, 100));
     opcodes.insert(0xf3, new_opcode("RETURN", 2, 0, 0));
     opcodes.insert(0xf4, new_opcode("DELEGATECALL", 6, 0, 100));
-    opcodes.insert(0xff, new_opcode("SELFDESCTRUCT", 1, 0, 5000));
+    opcodes.insert(0xff, new_opcode("SELFDESTRUCT", 1, 0, 5000));
 
 
     // a0s: Logging Operations
@@ -208,9 +238,128 @@ pub fn new_opcodes() -> HashMap<u8, Opcode> {
 }
 
 impl Stack {
-  // arithmetic
-  // TODO instead of [u8;32] converted to BigUint, use custom type uint256 that implements all
-  // the arithmetic
+   // Handle cold/warm access for account accessing operations to handle EIP-2929 and EIP-3529
+    fn charge_account_access(&mut self, access_list: &mut AccessList, address: &Address) -> u64 {
+        if access_list.is_cold_address(address) {
+            access_list.mark_address_warm(address.clone());
+            COLD_ACCOUNT_ACCESS_COST
+        } else {
+            WARM_ACCOUNT_ACCESS_COST
+        }
+    }
+    // EIP-2929: Handle SLOAD with cold/warm access
+    pub fn sload(&mut self, access_list: &mut AccessList) -> Result<(), String> {
+        let address = self.current_address;
+        let slot = H256::from_slice(&self.pop()?);
+
+        let access_cost = if access_list.is_cold_slot(&address, &slot) {
+            access_list.mark_slot_warm(address, slot.clone());
+            COLD_SLOAD_COST
+        } else {
+            WARM_STORAGE_READ_COST
+        };
+
+        self.gas -= access_cost;
+
+        // Perform the actual SLOAD operation...
+        let value = self.storage.get(&slot).cloned().unwrap_or_default();
+        self.push(&value)?;
+
+        Ok(())
+    }
+
+    // EIP-2929 + EIP-3529: Handle SSTORE with new gas costs and refund rules
+    pub fn sstore(&mut self, access_list: &mut AccessList) -> Result<(), String> {
+        let address = self.current_address;
+        let slot = H256::from_slice(&self.pop()?);
+        let new_value = self.pop()?;
+
+        // EIP-2929: Cold/warm slot access
+        let access_cost = if access_list.is_cold_slot(&address, &slot) {
+            access_list.mark_slot_warm(address, slot.clone());
+            COLD_SLOAD_COST
+        } else {
+            WARM_STORAGE_READ_COST
+        };
+        self.gas -= access_cost;
+
+        let original_value = self.storage_committed.get(&slot).cloned();
+        let current_value = self.storage.get(&slot).cloned();
+
+        // Calculate gas cost and refund based on EIP-3529 rules
+        let (cost, refund) = self.calculate_sstore_gas_and_refund(
+            &original_value,
+            &current_value,
+            &new_value
+        );
+
+        self.gas -= cost;
+        self.refund += refund;
+
+        // Update storage
+        if new_value.is_empty() {
+            self.storage.remove(&slot);
+        } else {
+            self.storage.insert(slot, new_value);
+        }
+
+        Ok(())
+    }
+
+    // Modified BALANCE operation with EIP-2929 access costs
+    pub fn balance(&mut self, access_list: &mut AccessList) -> Result<(), String> {
+        let address = Address::from_slice(&self.pop()?);
+        self.gas -= self.charge_account_access(access_list, &address);
+        // Perform actual balance operation...
+        Ok(())
+    }
+
+    // Calculate SSTORE gas and refund per EIP-3529
+    fn calculate_sstore_gas_and_refund(
+        &self,
+        original: &Option<Vec<u8>>,
+        current: &Option<Vec<u8>>,
+        new: &Vec<u8>
+    ) -> (u64, i64) {
+        let is_empty = |value: &Option<Vec<u8>>| value.as_ref().map_or(true, |v| v.is_empty());
+
+        // Current equals new (no-op)
+        if current.as_ref() == Some(new) {
+            return (WARM_STORAGE_READ_COST, 0);
+        }
+
+      // Current equals original (first write)
+        if current == original {
+            if is_empty(original) {
+                // 0 -> nonzero
+                (SSTORE_SET_GAS, 0)
+            } else if new.is_empty() {
+                // nonzero -> 0
+                (SSTORE_RESET_GAS, SSTORE_CLEARS_SCHEDULE as i64)
+            } else {
+                // nonzero -> nonzero
+                (SSTORE_RESET_GAS, 0)
+            }
+        } else {
+            // Current does not equal original (dirty slot)
+            let mut refund = 0;
+            if !is_empty(original) {
+                if is_empty(current) && !new.is_empty() {
+                    // Recreating an originally existing slot
+                    refund -= SSTORE_CLEARS_SCHEDULE as i64;
+                }
+                if !is_empty(current) && new.is_empty() {
+                    // Clearing a slot
+                    refund += SSTORE_CLEARS_SCHEDULE as i64;
+                }
+            }
+            (WARM_STORAGE_READ_COST, refund)
+        }
+    }
+
+
+
+
   pub fn add(&mut self) -> Result<(), String> {
       let b0 = BigUint::from_bytes_be(&self.pop()?[..]);
       let b1 = BigUint::from_bytes_be(&self.pop()?[..]);
@@ -353,8 +502,6 @@ impl Stack {
       Ok(())
   }
 
-  // crypto
-
   // contract context
   pub fn calldata_load(&mut self, calldata: &[u8]) -> Result<(), String> {
       let mut start = self.calldata_i;
@@ -400,7 +547,6 @@ impl Stack {
       Ok(())
   }
 
-  // blockchain context
 
   // storage and execution
   pub fn extend_mem(&mut self, start: usize, size: usize) {
