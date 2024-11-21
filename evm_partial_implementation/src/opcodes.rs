@@ -70,38 +70,6 @@ pub const GSTIPEND: u64 = 2300;
 pub const GSHA3WORD: u64 = 6;
 pub const GECRECOVER: u64 = 3000;
 
-
-// Track accessed addresses and storage slots for EIP-2929
-#[derive(Default)]
-pub struct AccessList {
-    addresses: HashSet<Address>,
-    storage: HashMap<Address, HashSet<H256>>,
-}
-
-impl AccessList {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn is_cold_address(&self, address: &Address) -> bool {
-        !self.addresses.contains(address)
-    }
-
-    pub fn is_cold_slot(&self, address: &Address, slot: &H256) -> bool {
-        !self.storage
-            .get(address)
-            .map_or(false, |slots| slots.contains(slot))
-    }
-
-    pub fn mark_address_warm(&mut self, address: Address) {
-        self.addresses.insert(address);
-    }
-
-    pub fn mark_slot_warm(&mut self, address: Address, slot: H256) {
-        self.storage.entry(address).or_default().insert(slot);
-    }
-}
-
 // Structure representing an opcode with its attributes,
 /// - `name`: The name of the opcode.
 /// - `inputs`: The number of items removed from the stack.
@@ -123,6 +91,12 @@ pub fn new_opcode(name: &str, inputs: u32, outputs: u32, gas: u64) -> Opcode {
       gas,
     }
 }
+//https://github.com/ethereum/EIPs/blob/master/EIPS/eip-2929.md
+// Increase the gas cost of SLOAD (0x54) to 2100,
+// and the *CALL opcode family (0xf1, f2, f4, fA),
+// BALANCE (0x31) and the EXT* opcode family (0x3b, 0x3c, 0x3f) to 2600.
+// Exempts (i) precompiles, and (ii) addresses and storage slots
+// that have already been accessed in the same transaction (100 gas).
 
 // Function to create a hashmap of opcodes
 pub fn new_opcodes() -> HashMap<u8, Opcode> {
@@ -163,7 +137,7 @@ pub fn new_opcodes() -> HashMap<u8, Opcode> {
 
     // 30s: Environmental Information
     opcodes.insert(0x30, new_opcode("ADDRESS", 0, 1, 2));
-    opcodes.insert(0x31, new_opcode("BALANCE", 1, 1, 100));
+    opcodes.insert(0x31, new_opcode("BALANCE", 1, 1, COLD_ACCOUNT_ACCESS_COST));
     opcodes.insert(0x32, new_opcode("ORIGIN", 0, 1, 2));
     opcodes.insert(0x33, new_opcode("CALLER", 0, 1, 2));
     opcodes.insert(0x34, new_opcode("CALLVALUE", 0, 1, 2));
@@ -173,11 +147,11 @@ pub fn new_opcodes() -> HashMap<u8, Opcode> {
     opcodes.insert(0x38, new_opcode("CODESIZE", 0, 1, 2));
     opcodes.insert(0x39, new_opcode("CODECOPY", 3, 0, 3));
     opcodes.insert(0x3a, new_opcode("GASPRICE", 0, 1, 2));
-    opcodes.insert(0x3b, new_opcode("EXTCODESIZE", 1, 1, 100));
-    opcodes.insert(0x3c, new_opcode("EXTCODECOPY", 4, 0, 100));
+    opcodes.insert(0x3b, new_opcode("EXTCODESIZE", 1, 1, COLD_ACCOUNT_ACCESS_COST ));
+    opcodes.insert(0x3c, new_opcode("EXTCODECOPY", 4, 0, COLD_ACCOUNT_ACCESS_COST));
     opcodes.insert(0x3d, new_opcode("RETURNDATASIZE", 0, 1, 2));
     opcodes.insert(0x3e, new_opcode("RETURNDATACOPY", 3, 0, 3));
-    opcodes.insert(0x3f, new_opcode("EXTCODEHASH", 1, 1, 100));
+    opcodes.insert(0x3f, new_opcode("EXTCODEHASH", 1, 1, COLD_ACCOUNT_ACCESS_COST));
 
     // 40s: Block Information
     opcodes.insert(0x40, new_opcode("BLOCKHASH", 1, 1, 20));
@@ -195,7 +169,7 @@ pub fn new_opcodes() -> HashMap<u8, Opcode> {
     opcodes.insert(0x51, new_opcode("MLOAD", 1, 1, 3));
     opcodes.insert(0x52, new_opcode("MSTORE", 2, 0, 3));
     opcodes.insert(0x53, new_opcode("MSTORE8", 2, 0, 3));
-    opcodes.insert(0x54, new_opcode("SLOAD", 1, 1, 100));
+    opcodes.insert(0x54, new_opcode("SLOAD", 1, 1, COLD_SLOAD_COST));
     opcodes.insert(0x55, new_opcode("SSTORE", 2, 0, 100));
     opcodes.insert(0x56, new_opcode("JUMP", 1, 0, 8));
     opcodes.insert(0x57, new_opcode("JUMPI", 2, 0, 10));
@@ -222,10 +196,10 @@ pub fn new_opcodes() -> HashMap<u8, Opcode> {
     }
     // closures
     opcodes.insert(0xf0, new_opcode("CREATE", 3, 1, 32000));
-    opcodes.insert(0xf1, new_opcode("CALL", 7, 1, 100));
-    opcodes.insert(0xf2, new_opcode("CALLCODE", 7, 1, 100));
+    opcodes.insert(0xf1, new_opcode("CALL", 7, 1, COLD_ACCOUNT_ACCESS_COST));
+    opcodes.insert(0xf2, new_opcode("CALLCODE", 7, 1, COLD_ACCOUNT_ACCESS_COST));
     opcodes.insert(0xf3, new_opcode("RETURN", 2, 0, 0));
-    opcodes.insert(0xf4, new_opcode("DELEGATECALL", 6, 0, 100));
+    opcodes.insert(0xf4, new_opcode("DELEGATECALL", 6, 0, COLD_ACCOUNT_ACCESS_COST));
     opcodes.insert(0xff, new_opcode("SELFDESTRUCT", 1, 0, 5000));
 
     // a0s: Logging Operations
@@ -238,301 +212,13 @@ pub fn new_opcodes() -> HashMap<u8, Opcode> {
     opcodes
 }
 
-impl Stack {
-   // Handle cold/warm access for account accessing operations to handle EIP-2929 and EIP-3529
-    fn charge_account_access(&mut self, access_list: &mut AccessList, address: &Address) -> u64 {
-        if access_list.is_cold_address(address) {
-            access_list.mark_address_warm(address.clone());
-            COLD_ACCOUNT_ACCESS_COST
-        } else {
-            WARM_ACCOUNT_ACCESS_COST
-        }
-    }
-    // EIP-2929: Handle SLOAD with cold/warm access
-    pub fn sload(&mut self, access_list: &mut AccessList) -> Result<(), String> {
-        let address = self.current_address;
-        let slot = H256::from_slice(&self.pop()?);
-
-        let access_cost = if access_list.is_cold_slot(&address, &slot) {
-            access_list.mark_slot_warm(address, slot.clone());
-            COLD_SLOAD_COST
-        } else {
-            WARM_STORAGE_READ_COST
-        };
-
-        self.gas -= access_cost;
-
-        // Perform the actual SLOAD operation...
-        let value = self.storage.get(&slot).cloned().unwrap_or_default();
-        self.push(&value)?;
-
-        Ok(())
-    }
-
-    // Modified BALANCE operation with EIP-2929 access costs
-    pub fn balance(&mut self, access_list: &mut AccessList) -> Result<(), String> {
-        let address = Address::from_slice(&self.pop()?);
-        self.gas -= self.charge_account_access(access_list, &address);
-        // Perform actual balance operation...
-        Ok(())
-    }
-
-  pub fn add(&mut self) -> Result<(), String> {
-      let b0 = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b1 = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push_arbitrary(&(b0 + b1).to_bytes_be());
-      Ok(())
-  }
-  pub fn mul(&mut self) -> Result<(), String> {
-      let b0 = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b1 = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push_arbitrary(&(b0 * b1).to_bytes_be());
-      Ok(())
-  }
-  pub fn sub(&mut self) -> Result<(), String> {
-      let b0 = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b1 = BigUint::from_bytes_be(&self.pop()?[..]);
-      if b0 >= b1 {
-          self.push_arbitrary(&(b0 - b1).to_bytes_be());
-      } else {
-          // 2**256 TODO this will not be here hardcoded, there will be a custom type uint256
-          let max =
-              "115792089237316195423570985008687907853269984665640564039457584007913129639936"
-                  .parse::<BigUint>()
-                  .unwrap();
-          self.push_arbitrary(&(max + b0 - b1).to_bytes_be());
-      }
-      Ok(())
-  }
-  pub fn div(&mut self) -> Result<(), String> {
-      let b0 = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b1 = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push_arbitrary(&(b0 / b1).to_bytes_be());
-      Ok(())
-  }
-  pub fn sdiv(&mut self) -> Result<(), String> {
-      Err("unimplemented".to_string())
-  }
-  pub fn modulus(&mut self) -> Result<(), String> {
-      let b0 = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b1 = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push_arbitrary(&(b0 % b1).to_bytes_be());
-      Ok(())
-  }
-  pub fn smod(&mut self) -> Result<(), String> {
-      Err("unimplemented".to_string())
-  }
-  pub fn add_mod(&mut self) -> Result<(), String> {
-      let b0 = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b1 = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b2 = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push_arbitrary(&(b0 + b1 % b2).to_bytes_be());
-      Ok(())
-  }
-  pub fn mul_mod(&mut self) -> Result<(), String> {
-      let b0 = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b1 = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b2 = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push_arbitrary(&(b0 * b1 % b2).to_bytes_be());
-      Ok(())
-  }
-  pub fn exp(&mut self) -> Result<(), String> {
-      let b = BigUint::from_bytes_be(&self.pop()?[..]);
-      let e = BigUint::from_bytes_be(&self.pop()?[..]);
-
-      let mut r = "1".parse::<BigUint>().unwrap();
-      let zero = "0".parse::<BigUint>().unwrap();
-      let mut rem = e.clone();
-      let mut exp = b;
-      // 2**256 TODO this will not be here hardcoded, there will be a custom type uint256
-      let field =
-          "115792089237316195423570985008687907853269984665640564039457584007913129639936"
-              .parse::<BigUint>()
-              .unwrap();
-      while rem != zero {
-          if rem.bit(0) {
-              // is odd
-              r = r * exp.clone() % field.clone();
-          }
-          exp = exp.clone() * exp.clone();
-          rem >>= 1;
-      }
-      self.push_arbitrary(&r.to_bytes_be());
-
-      let n_bytes = &e.to_bytes_be().len();
-      let mut exp_fee = (n_bytes * GEXPONENTBYTE as usize) as u64;
-      exp_fee += (EXP_SUPPLEMENTAL_GAS as usize * n_bytes) as u64;
-      self.gas -= exp_fee as u64;
-      Ok(())
-  }
-
-  // boolean
-  pub fn lt(&mut self) -> Result<(), String> {
-      let a = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push(u256::usize_to_u256((a < b) as usize));
-      Ok(())
-  }
-  pub fn gt(&mut self) -> Result<(), String> {
-      let a = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push(u256::usize_to_u256((a > b) as usize));
-      Ok(())
-  }
-  pub fn eq(&mut self) -> Result<(), String> {
-      let a = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push(u256::usize_to_u256((a == b) as usize));
-      Ok(())
-  }
-  pub fn is_zero(&mut self) -> Result<(), String> {
-      let a = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push(u256::usize_to_u256(a.is_zero() as usize));
-      Ok(())
-  }
-  pub fn and(&mut self) -> Result<(), String> {
-      let a = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push_arbitrary(&(a & b).to_bytes_be());
-      Ok(())
-  }
-  pub fn or(&mut self) -> Result<(), String> {
-      let a = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push_arbitrary(&(a | b).to_bytes_be());
-      Ok(())
-  }
-  pub fn xor(&mut self) -> Result<(), String> {
-      let a = BigUint::from_bytes_be(&self.pop()?[..]);
-      let b = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push_arbitrary(&(a ^ b).to_bytes_be());
-      Ok(())
-  }
-  pub fn not(&mut self) -> Result<(), String> {
-      // 2**256-1 TODO this will not be here hardcoded, there will be a custom type uint256
-      let f = "115792089237316195423570985008687907853269984665640564039457584007913129639935"
-          .parse::<BigUint>()
-          .unwrap();
-
-      let a = BigUint::from_bytes_be(&self.pop()?[..]);
-      self.push_arbitrary(&(f - a).to_bytes_be());
-      Ok(())
-  }
-
-  // contract context
-  pub fn calldata_load(&mut self, calldata: &[u8]) -> Result<(), String> {
-      let mut start = self.calldata_i;
-      if !self.stack.is_empty() {
-          start = u256::u256_to_u64(self.peek()?) as usize;
-      }
-      let l = calldata.len();
-      if start > l {
-          start = l;
-      }
-      let mut end = start + self.calldata_size;
-      if end > l {
-          end = l;
-      }
-      self.put_arbitrary(&calldata[start..end]);
-      self.calldata_i += self.calldata_size;
-      Ok(())
-  }
-  pub fn calldata_size(&mut self, calldata: &[u8]) {
-      self.calldata_size = calldata.len();
-      self.push(u256::usize_to_u256(self.calldata_size));
-  }
-  fn spend_gas_data_copy(&mut self, length: usize) {
-      let length32 = upper_multiple_of_32(length);
-      self.gas -= ((GCOPY as usize * length32) / 32) as u64;
-  }
-  pub fn code_copy(&mut self, code: &[u8]) -> Result<(), String> {
-      let dest_offset = u256::u256_to_u64(self.pop()?) as usize;
-      let offset = u256::u256_to_u64(self.pop()?) as usize;
-      let length = u256::u256_to_u64(self.pop()?) as usize;
-
-      self.extend_mem(dest_offset, length);
-      self.spend_gas_data_copy(length);
-
-      for i in 0..length {
-          if offset + i < code.len() {
-              self.mem[dest_offset + i] = code[offset + i];
-          } else {
-              self.mem[dest_offset + i] = 0;
-          }
-      }
-      // self.mem[dest_offset..dest_offset+length] =
-      Ok(())
-  }
-
-
-  // storage and execution
-  pub fn extend_mem(&mut self, start: usize, size: usize) {
-      if size <= self.mem.len() || start + size <= self.mem.len() {
-          return;
-      }
-      let old_size = self.mem.len() / 32;
-      let new_size = upper_multiple_of_32(start + size) / 32;
-      let old_total_fee = (old_size * GMEMORY as usize + old_size.pow(2) / GQUADRATICMEMDENOM as usize) as u64;
-      let new_total_fee = (new_size * GMEMORY as usize + new_size.pow(2) / GQUADRATICMEMDENOM as usize) as u64;
-      let mem_fee = new_total_fee - old_total_fee;
-      self.gas -= mem_fee as u64;
-      let mut new_bytes: Vec<u8> = vec![0; (new_size - old_size) * 32];
-      self.mem.append(&mut new_bytes);
-  }
-  pub fn mload(&mut self) -> Result<(), String> {
-      let pos = u256::u256_to_u64(self.pop()?) as usize;
-      self.extend_mem(pos as usize, 32);
-      let mem32 = self.mem[pos..pos + 32].to_vec();
-      self.push_arbitrary(&mem32);
-      Ok(())
-  }
-  pub fn mstore(&mut self) -> Result<(), String> {
-      let pos = u256::u256_to_u64(self.pop()?);
-      let val = self.pop()?;
-      self.extend_mem(pos as usize, 32);
-
-      self.mem[pos as usize..].copy_from_slice(&val);
-      Ok(())
-  }
-
-
-  pub fn jump(&mut self, code: &[u8]) -> Result<(), String> {
-      // TODO that jump destination is valid
-      let new_pc = u256::u256_to_u64(self.pop()?) as usize;
-      if !valid_dest(code, new_pc) {
-          return Err(format!("not valid dest: {:02x}", new_pc));
-      }
-      self.pc = new_pc;
-      Ok(())
-  }
-  pub fn jump_i(&mut self, code: &[u8]) -> Result<(), String> {
-      let new_pc = u256::u256_to_u64(self.pop()?) as usize;
-      if !valid_dest(code, new_pc) {
-          return Err(format!("not valid dest: {:02x}", new_pc));
-      }
-      if !self.stack.is_empty() {
-          let cond = u256::u256_to_u64(self.pop()?) as usize;
-          if cond != 0 {
-              self.pc = new_pc;
-          }
-      }
-      // let cont = self.pop();
-      // if cont {} // TODO depends on having impl Err in pop()
-      Ok(())
-  }
-  pub fn jump_dest(&mut self) -> Result<(), String> {
-      // TODO
-      Ok(())
-  }
-}
-
 fn valid_dest(code: &[u8], pos: usize) -> bool {
-  if code[pos] == 0x5b {
-      return true;
-  }
-  false
+    if code[pos] == 0x5b {
+        return true;
+    }
+    false
 }
 
 fn upper_multiple_of_32(n: usize) -> usize {
-  ((n - 1) | 31) + 1
+    ((n - 1) | 31) + 1
 }
