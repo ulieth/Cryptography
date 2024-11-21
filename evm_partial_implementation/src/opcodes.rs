@@ -18,54 +18,55 @@
 
 use super::*;
 use std::collections::HashMap;
-se num_bigint::BigUint;
+use num_bigint::BigUint;
 use num_traits::identities::Zero;
 // Constants representing gas prices for various operations in the Ethereum Virtual Machine (EVM).
 // These values are derived from the Ethereum Yellow Paper and Ethereum Improvement Proposals (EIPs).
 // They serve to quantify the computational cost of executing operations, ensuring fair resource allocation
 // and preventing abuse of the network.
 
-pub const GDEFAULT: usize = 1; // Default gas cost for basic operations.
-pub const GMEMORY: usize = 3; // Gas cost for using memory (per 32 bytes).
-pub const GQUADRATICMEMDENOM: usize = 512; // Cost factor for quadratic memory calculations (1 gas per 512 quadwords).
-// Storage-related gas costs
-const GSTORAGEREFUND: usize = 15000; // Gas refund amount for freeing up storage.
-const GSTORAGEKILL: usize = 5000; // Gas cost for deleting storage.
-const GSTORAGEMOD: usize = 5000; // Gas cost for modifying storage.
-const GSTORAGEADD: usize = 20000; // Gas cost for adding new storage.
-const NETSSTORENOOPGAS: u64 = 200;
-const NETSSTOREINITGAS: u64 = 20000;
-const NETSSTORECLEARREFUND: u64 = 15000;
-const NETSSTORERESETCLEARREFUND: u64 = 19800;
-const NETSSTORERESETREFUND: u64 = 4800;
-const NETSSTORECLEANGAS: u64 = 5000;
-const NETSSTOREDIRTYGAS: u64 = 200;
-// Memory and copy-related gas costs
-const GCOPY: usize = 3; // Gas cost for copying one 32-byte word.
-const GEXPONENTBYTE: usize = 10; // Cost of the EXP exponent per byte.
-const EXP_SUPPLEMENTAL_GAS: usize = 40; // Supplemental gas cost for EXP operations.
+// Base costs
+pub const GDEFAULT: u64 = 1;
+pub const GMEMORY: u64 = 3;
+pub const GQUADRATICMEMDENOM: u64 = 512;
 
-const GCONTRACTBYTE: usize = 200; // one byte of code in contract creation
-const GCALLVALUETRANSFER: usize = 9000; // non-zero-valued call
-const GLOGBYTE: usize = 8; // cost of a byte of logdata
-// Transaction-related gas costs
-const GTXCOST: usize = 21000; // TX BASE GAS COST
-const GTXDATAZERO: usize = 4; // TX DATA ZERO BYTE GAS COST
-const GTXDATANONZERO: usize = 68; // TX DATA NON ZERO BYTE GAS COST
+// Storage costs per EIP-2929 and EIP-3529
+// EIP-3529 removes gas refunds for SELFDESTRUCT, and reduce gas refunds for SSTORE to a lower level
+// https://github.com/ethereum/EIPs/blob/master/EIPS/eip-2929.md
+// https://github.com/ethereum/EIPs/blob/master/EIPS/eip-3529.md
+pub const COLD_SLOAD_COST: u64 = 2100;
+pub const WARM_STORAGE_READ_COST: u64 = 100;
+pub const SSTORE_SET_GAS: u64 = 20000;
+pub const SSTORE_RESET_GAS: u64 = 2900;
+pub const SSTORE_CLEARS_SCHEDULE: u64 = 4800;
 
-const GSHA3WORD: usize = 6; // Cost of SHA3 per word
-const GSHA256BASE: usize = 60; // Base c of SHA256
-const GSHA256WORD: usize = 12; // Cost of SHA256 per word
-const GRIPEMD160BASE: usize = 600; // Base cost of RIPEMD160
-const GRIPEMD160WORD: usize = 120; // Cost of RIPEMD160 per word
-const GIDENTITYBASE: usize = 15; // Base cost of indentity
-const GIDENTITYWORD: usize = 3; // Cost of identity per word
-const GECRECOVER: usize = 3000; // Cost of ecrecover op
+// Memory and copy costs
+pub const GCOPY: u64 = 3;
+pub const GEXPONENTBYTE: u64 = 10;
+pub const EXP_SUPPLEMENTAL_GAS: u64 = 40;
 
-const GSTIPEND: usize = 2300;
+// Contract operations
+pub const GCONTRACTBYTE: u64 = 200;
+pub const GCALLVALUETRANSFER: u64 = 9000;
+pub const GLOGBYTE: u64 = 8;
 
-const GCALLNEWACCOUNT: usize = 25000;
-const GSUICIDEREFUND: usize = 24000;
+// Transaction costs per EIP-2028
+pub const GTXCOST: u64 = 21000;
+pub const GTXDATAZERO: u64 = 4;
+pub const GTXDATANONZERO: u64 = 16;
+
+// Access list costs per EIP-2930
+pub const ACCESS_LIST_ADDRESS_COST: u64 = 2400;
+pub const ACCESS_LIST_STORAGE_KEY_COST: u64 = 1900;
+
+// Contract creation and calls
+pub const GCALLNEWACCOUNT: u64 = 25000;
+pub const GSTIPEND: u64 = 2300;
+
+// Cryptographic operation costs
+pub const GSHA3WORD: u64 = 6;
+pub const GECRECOVER: u64 = 3000;
+
 
 // Structure representing an opcode with its attributes,
 /// - `name`: The name of the opcode.
@@ -430,9 +431,13 @@ impl Stack {
       self.mem[pos as usize..].copy_from_slice(&val);
       Ok(())
   }
+
+  // pub fn `sstore` functon implements EIP-1283
+  // EIP-1283 proposes net gas metering changes for SSTORE opcode,
+  // enabling new usages for contract storage, and reducing excessive gas costs
   pub fn sstore(&mut self) -> Result<(), String> {
-      // https://eips.ethereum.org/EIPS/eip-3529
       // https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1283.md
+      // Replace SSTORE opcode gas cost calculation (including refunds) with the following logic:
       // 1. If current value equals new value (this is a no-op), 200 gas is deducted.
       // 2. If current value does not equal new value
       //   2.1. If original value equals current value (this storage slot has not been changed by the current execution context)
@@ -446,6 +451,10 @@ impl Stack {
       //       2.2.2.1. If original value is 0, add 19800 gas to refund counter.
       // 	     2.2.2.2. Otherwise, add 4800 gas to refund counter.
 
+      // Handles storage changes with three key values:
+      // - Original value: Value at the start of the transaction (if reversion happens)
+      // - Current value: Value before this SSTORE operation
+      // - New value: Value being written by this SSTORE operation
       let empty: Vec<u8> = Vec::new();
       let key = self.pop()?;
       let value = self.pop()?;
@@ -453,29 +462,36 @@ impl Stack {
           Some(v) => v.clone(),
           None => empty.clone(),
       };
+
       let current = match self.storage.get(&key) {
           Some(v) => v.clone(),
           None => {
-              self.gas -= 2100;
+              self.gas -= 2100; // Cold storage access cost
               empty.clone()
           }
       };
-
+      // Case 1: No-op case - current value equals new value
+      // This is the cheapest operation as no storage change is needed
       if current == value {
-          self.gas -= NETSSTORENOOPGAS;
+          self.gas -= NETSSTORENOOPGAS; // 200 gas
           return Ok(());
       }
+      // Case 2: Fresh slot case - original value equals current value
+      // This means this storage slot has not been changed in current execution
       if original == current {
           if original.is_empty() {
-              self.gas -= NETSSTOREINITGAS;
+              self.gas -= NETSSTOREINITGAS; // 20,000 gas
               return Ok(());
           }
+          // Fresh slot being set from non-0 to 0, add refund
           if value.is_empty() {
               self.gas += NETSSTORECLEARREFUND;
           }
           self.gas -= NETSSTORECLEANGAS;
           return Ok(());
       }
+      // Case 3: Dirty slot case - original value does not equal current value
+      // Handle refunds for original non-zero cases
       if !original.is_empty() {
           if current.is_empty() {
               self.gas -= NETSSTORECLEARREFUND;
@@ -483,6 +499,8 @@ impl Stack {
               self.gas += NETSSTORECLEARREFUND;
           }
       }
+      // Case 4: Reset case - original value equals new value
+      // Provide additional refunds when a dirty slot is reset to its original value
       if original == value {
           if original.is_empty() {
               self.gas += NETSSTORERESETCLEARREFUND;
@@ -494,6 +512,7 @@ impl Stack {
       self.storage.insert(key, value.to_vec());
       Ok(())
   }
+
   pub fn jump(&mut self, code: &[u8]) -> Result<(), String> {
       // TODO that jump destination is valid
       let new_pc = u256::u256_to_u64(self.pop()?) as usize;
