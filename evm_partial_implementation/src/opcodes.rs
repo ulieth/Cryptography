@@ -228,7 +228,6 @@ pub fn new_opcodes() -> HashMap<u8, Opcode> {
     opcodes.insert(0xf4, new_opcode("DELEGATECALL", 6, 0, 100));
     opcodes.insert(0xff, new_opcode("SELFDESTRUCT", 1, 0, 5000));
 
-
     // a0s: Logging Operations
     opcodes.insert(0xa0, new_opcode("LOG0", 2, 0, 375));
     opcodes.insert(0xa1, new_opcode("LOG1", 3, 0, 750));
@@ -270,93 +269,12 @@ impl Stack {
         Ok(())
     }
 
-    // EIP-2929 + EIP-3529: Handle SSTORE with new gas costs and refund rules
-    pub fn sstore(&mut self, access_list: &mut AccessList) -> Result<(), String> {
-        let address = self.current_address;
-        let slot = H256::from_slice(&self.pop()?);
-        let new_value = self.pop()?;
-
-        // EIP-2929: Cold/warm slot access
-        let access_cost = if access_list.is_cold_slot(&address, &slot) {
-            access_list.mark_slot_warm(address, slot.clone());
-            COLD_SLOAD_COST
-        } else {
-            WARM_STORAGE_READ_COST
-        };
-        self.gas -= access_cost;
-
-        let original_value = self.storage_committed.get(&slot).cloned();
-        let current_value = self.storage.get(&slot).cloned();
-
-        // Calculate gas cost and refund based on EIP-3529 rules
-        let (cost, refund) = self.calculate_sstore_gas_and_refund(
-            &original_value,
-            &current_value,
-            &new_value
-        );
-
-        self.gas -= cost;
-        self.refund += refund;
-
-        // Update storage
-        if new_value.is_empty() {
-            self.storage.remove(&slot);
-        } else {
-            self.storage.insert(slot, new_value);
-        }
-
-        Ok(())
-    }
-
     // Modified BALANCE operation with EIP-2929 access costs
     pub fn balance(&mut self, access_list: &mut AccessList) -> Result<(), String> {
         let address = Address::from_slice(&self.pop()?);
         self.gas -= self.charge_account_access(access_list, &address);
         // Perform actual balance operation...
         Ok(())
-    }
-
-    // Calculate SSTORE gas and refund per EIP-3529
-    fn calculate_sstore_gas_and_refund(
-        &self,
-        original: &Option<Vec<u8>>,
-        current: &Option<Vec<u8>>,
-        new: &Vec<u8>
-    ) -> (u64, i64) {
-        let is_empty = |value: &Option<Vec<u8>>| value.as_ref().map_or(true, |v| v.is_empty());
-
-        // Current equals new (no-op)
-        if current.as_ref() == Some(new) {
-            return (WARM_STORAGE_READ_COST, 0);
-        }
-
-      // Current equals original (first write)
-        if current == original {
-            if is_empty(original) {
-                // 0 -> nonzero
-                (SSTORE_SET_GAS, 0)
-            } else if new.is_empty() {
-                // nonzero -> 0
-                (SSTORE_RESET_GAS, SSTORE_CLEARS_SCHEDULE as i64)
-            } else {
-                // nonzero -> nonzero
-                (SSTORE_RESET_GAS, 0)
-            }
-        } else {
-            // Current does not equal original (dirty slot)
-            let mut refund = 0;
-            if !is_empty(original) {
-                if is_empty(current) && !new.is_empty() {
-                    // Recreating an originally existing slot
-                    refund -= SSTORE_CLEARS_SCHEDULE as i64;
-                }
-                if !is_empty(current) && new.is_empty() {
-                    // Clearing a slot
-                    refund += SSTORE_CLEARS_SCHEDULE as i64;
-                }
-            }
-            (WARM_STORAGE_READ_COST, refund)
-        }
     }
 
 
