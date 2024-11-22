@@ -1,11 +1,56 @@
+//lib.rs
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
+use num_bigint::{BigUint, BigInt, Sign};
+use num_traits::Zero;
 pub mod opcodes;
 pub mod u256;
 mod types;
 use types::{Address, H256};
+use crate::opcodes::{
+  COLD_SLOAD_COST,
+  WARM_STORAGE_READ_COST,
+  COLD_ACCOUNT_ACCESS_COST,
+  WARM_ACCOUNT_ACCESS_COST,
+  GMEMORY,
+  GQUADRATICMEMDENOM,
+  GCOPY,
+  GEXPONENTBYTE,
+  EXP_SUPPLEMENTAL_GAS,
+};
 
+// Track accessed addresses and storage slots for EIP-2929
+#[derive(Default)]
+pub struct AccessList {
+    addresses: HashSet<Address>,
+    storage: HashMap<Address, HashSet<H256>>,
+}
+impl AccessList {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn is_storage_cold(&self, address: &Address, slot: &H256) -> bool {
+      self.is_cold_slot(address, slot)
+    }
+    pub fn mark_storage_warm(&mut self, address: Address, slot: H256) {
+        self.mark_slot_warm(address, slot);
+    }
+    pub fn is_cold_address(&self, address: &Address) -> bool {
+        !self.addresses.contains(address)
+    }
+    pub fn is_cold_slot(&self, address: &Address, slot: &H256) -> bool {
+        !self.storage
+            .get(address)
+            .map_or(false, |slots| slots.contains(slot))
+    }
+    pub fn mark_address_warm(&mut self, address: Address) {
+        self.addresses.insert(address);
+    }
+    pub fn mark_slot_warm(&mut self, address: Address, slot: H256) {
+        self.storage.entry(address).or_default().insert(slot);
+    }
+}
 
 #[derive(Default)]
 pub struct Stack {
@@ -21,6 +66,7 @@ pub struct Stack {
     pub opcodes: HashMap<u8, opcodes::Opcode>,
     pub current_address: Address,  // Track current contract address
     pub access_list: AccessList,   // Track accessed addresses and slots
+    pub code: Vec<u8>,
 }
 
 impl Stack {
@@ -38,6 +84,7 @@ impl Stack {
             opcodes: HashMap::new(),
             current_address: [0u8; 20],
             access_list: AccessList::new(),
+            code: Vec::new(),
         };
         s.opcodes = opcodes::new_opcodes();
         s
@@ -112,12 +159,13 @@ impl Stack {
 
 
     // EXTCODESIZE (0x3b)
-    pub fn extcodesize(&mut self, access_list: &mut AccessList) -> Result<(), String> {
-        let address = Address::from_slice(&self.pop()?);
+    pub fn extcodesize(&mut self) -> Result<(), String> {
+        let mut address: Address = [0u8; 20];
+        address.copy_from_slice(&self.pop()?[12..32]);
 
         // Apply EIP-2929 access cost
-        let access_cost = if access_list.is_cold_address(&address) {
-            access_list.mark_address_warm(address);
+        let access_cost = if self.access_list.is_cold_address(&address) {
+            self.access_list.mark_address_warm(address);
             COLD_ACCOUNT_ACCESS_COST
         } else {
             WARM_ACCOUNT_ACCESS_COST
@@ -130,15 +178,16 @@ impl Stack {
         Ok(())
     }
     // EXTCODECOPY (0x3c)
-    pub fn extcodecopy(&mut self, access_list: &mut AccessList) -> Result<(), String> {
-        let address = Address::from_slice(&self.pop()?);
+    pub fn extcodecopy(&mut self) -> Result<(), String> {
+        let mut address: Address = [0u8; 20];
+        address.copy_from_slice(&self.pop()?[12..32]);
         let dest_offset = u256::u256_to_u64(self.pop()?) as usize;
         let offset = u256::u256_to_u64(self.pop()?) as usize;
         let length = u256::u256_to_u64(self.pop()?) as usize;
 
         // Apply EIP-2929 access cost
-        let access_cost = if access_list.is_cold_address(&address) {
-        access_list.mark_address_warm(address);
+        let access_cost = if self.access_list.is_cold_address(&address) {
+        self.access_list.mark_address_warm(address);
         opcodes::COLD_ACCOUNT_ACCESS_COST
       } else {
           opcodes::WARM_ACCOUNT_ACCESS_COST
@@ -157,11 +206,12 @@ impl Stack {
     }
 
     // EXTCODEHASH (0x3f)
-    pub fn extcodehash(&mut self, access_list: &mut AccessList) -> Result<(), String> {
-        let address = Address::from_slice(&self.pop()?);
+    pub fn extcodehash(&mut self) -> Result<(), String> {
+        let mut address: Address = [0u8; 20];
+        address.copy_from_slice(&self.pop()?[12..32]);
 
-        let access_cost = if access_list.is_cold_address(&address) {
-            access_list.mark_address_warm(address);
+        let access_cost = if self.access_list.is_cold_address(&address) {
+            self.access_list.mark_address_warm(address);
             opcodes::COLD_ACCOUNT_ACCESS_COST
         } else {
             opcodes::WARM_ACCOUNT_ACCESS_COST
@@ -173,17 +223,18 @@ impl Stack {
     }
 
     // CALL (0xf1)
-    pub fn call(&mut self, access_list: &mut AccessList) -> Result<(), String> {
+    pub fn call(&mut self) -> Result<(), String> {
         let gas = u256::u256_to_u64(self.pop()?);
-        let address = Address::from_slice(&self.pop()?);
+        let mut address: Address = [0u8; 20];
+        address.copy_from_slice(&self.pop()?[12..32]);
         let value = self.pop()?;
         let args_offset = u256::u256_to_u64(self.pop()?) as usize;
         let args_length = u256::u256_to_u64(self.pop()?) as usize;
         let ret_offset = u256::u256_to_u64(self.pop()?) as usize;
         let ret_length = u256::u256_to_u64(self.pop()?) as usize;
 
-        let access_cost = if access_list.is_cold_address(&address) {
-            access_list.mark_address_warm(address);
+        let access_cost = if self.access_list.is_cold_address(&address) {
+            self.access_list.mark_address_warm(address);
             opcodes::COLD_ACCOUNT_ACCESS_COST
         } else {
            opcodes::WARM_ACCOUNT_ACCESS_COST
@@ -198,17 +249,18 @@ impl Stack {
     }
 
     // CALLCODE (0xf2)
-    pub fn callcode(&mut self, access_list: &mut AccessList) -> Result<(), String> {
+    pub fn callcode(&mut self) -> Result<(), String> {
         let gas = u256::u256_to_u64(self.pop()?);
-        let address = Address::from_slice(&self.pop()?);
+        let mut address: Address = [0u8; 20];
+        address.copy_from_slice(&self.pop()?[12..32]);
         let value = self.pop()?;
         let args_offset = u256::u256_to_u64(self.pop()?) as usize;
         let args_length = u256::u256_to_u64(self.pop()?) as usize;
         let ret_offset = u256::u256_to_u64(self.pop()?) as usize;
         let ret_length = u256::u256_to_u64(self.pop()?) as usize;
 
-        let access_cost = if access_list.is_cold_address(&address) {
-            access_list.mark_address_warm(address);
+        let access_cost = if self.access_list.is_cold_address(&address) {
+            self.access_list.mark_address_warm(address);
             opcodes::COLD_ACCOUNT_ACCESS_COST
         } else {
             opcodes::WARM_ACCOUNT_ACCESS_COST
@@ -223,16 +275,17 @@ impl Stack {
     }
 
     // DELEGATECALL (0xf4)
-    pub fn delegatecall(&mut self, access_list: &mut AccessList) -> Result<(), String> {
+    pub fn delegatecall(&mut self) -> Result<(), String> {
         let gas = u256::u256_to_u64(self.pop()?);
-        let address = Address::from_slice(&self.pop()?);
+        let mut address: Address = [0u8; 20];
+        address.copy_from_slice(&self.pop()?[12..32]);
         let args_offset = u256::u256_to_u64(self.pop()?) as usize;
         let args_length = u256::u256_to_u64(self.pop()?) as usize;
         let ret_offset = u256::u256_to_u64(self.pop()?) as usize;
         let ret_length = u256::u256_to_u64(self.pop()?) as usize;
 
-        let access_cost = if access_list.is_cold_address(&address) {
-            access_list.mark_address_warm(address);
+        let access_cost = if self.access_list.is_cold_address(&address) {
+            self.access_list.mark_address_warm(address);
             opcodes::COLD_ACCOUNT_ACCESS_COST
         } else {
             opcodes::WARM_ACCOUNT_ACCESS_COST
@@ -248,12 +301,6 @@ impl Stack {
 
 
 
-
-
-
-
-
-
     // Handle cold/warm access for account accessing operations to handle EIP-2929 and EIP-3529
     fn charge_account_access(&mut self, access_list: &mut AccessList, address: &Address) -> u64 {
         if access_list.is_cold_address(address) {
@@ -264,12 +311,13 @@ impl Stack {
         }
     }
     // EIP-2929: Handle SLOAD with cold/warm access
-    pub fn sload(&mut self, access_list: &mut AccessList) -> Result<(), String> {
+    pub fn sload(&mut self) -> Result<(), String> {
         let address = self.current_address;
-        let slot = H256::from_slice(&self.pop()?);
+        let mut slot: H256 = [0u8; 32];
+        slot.copy_from_slice(&self.pop()?[..]);
 
-        let access_cost = if access_list.is_cold_slot(&address, &slot) {
-            access_list.mark_slot_warm(address, slot.clone());
+        let access_cost = if self.access_list.is_cold_slot(&address, &slot) {
+            self.access_list.mark_slot_warm(address, slot.clone());
             COLD_SLOAD_COST
         } else {
             WARM_STORAGE_READ_COST
@@ -278,18 +326,25 @@ impl Stack {
         self.gas -= access_cost;
 
         let value = self.storage.get(&slot).cloned().unwrap_or_default();
-        self.push(&value)?;
+        self.push_arbitrary(&value);
 
         Ok(())
     }
 
-    // Modified BALANCE operation with EIP-2929 access costs
-    pub fn balance(&mut self, access_list: &mut AccessList) -> Result<(), String> {
-        let address = Address::from_slice(&self.pop()?);
-        self.gas -= self.charge_account_access(access_list, &address);
-        // Perform actual balance operation...
+    pub fn balance(&mut self) -> Result<(), String> {
+        let mut address: Address = [0u8; 20];
+        address.copy_from_slice(&self.pop()?[12..32]);
+
+        let access_cost = if self.access_list.is_cold_address(&address) {
+            self.access_list.mark_address_warm(address);
+            COLD_ACCOUNT_ACCESS_COST
+        } else {
+              WARM_ACCOUNT_ACCESS_COST
+        };
+
+        self.gas -= access_cost;
         Ok(())
-    }
+  }
 
     // Add stack underflow validation helper
     fn require_stack_items(&self, required: usize) -> Result<(), String> {
@@ -637,13 +692,13 @@ impl Stack {
                     }
                     0x30 => {
                         match opcode {
-                            0x31 => self.balance(&mut self.access_list)?, // BALANCE with EIP-2929
+                            0x31 => self.balance()?,
                             0x35 => self.calldata_load(&calldata)?,
                             0x36 => self.calldata_size(&calldata),
                             0x39 => self.code_copy(&code)?,
-                            0x3b => self.extcodesize(&mut self.access_list)?, // EXTCODESIZE with EIP-2929
-                            0x3c => self.extcodecopy(&mut self.access_list)?, // EXTCODECOPY with EIP-2929
-                            0x3f => self.extcodehash(&mut self.access_list)?, // EXTCODEHASH with EIP-2929
+                            0x3b => self.extcodesize()?, // EXTCODESIZE with EIP-2929
+                            0x3c => self.extcodecopy()?, // EXTCODECOPY with EIP-2929
+                            0x3f => self.extcodehash()?, // EXTCODEHASH with EIP-2929
                             _ => return Err(format!("unimplemented {:x}", opcode)),
                         }
                         self.pc += 1;
@@ -653,8 +708,8 @@ impl Stack {
                         match opcode {
                             0x51 => self.mload()?,
                             0x52 => self.mstore()?,
-                            0x54 => self.sload(&mut self.access_list)?, // SLOAD with EIP-2929
-                            0x55 => self.sstore(&mut self.access_list)?, // SSTORE with EIP-2929
+                            0x54 => self.sload()?, // SLOAD with EIP-2929
+                            0x55 => self.sstore()?, // SSTORE with EIP-2929
                             0x56 => self.jump(code)?,
                             0x57 => self.jump_i(code)?,
                             0x5b => self.jump_dest()?,
@@ -691,14 +746,14 @@ impl Stack {
                     }
                     0xf0 => {
                         match opcode {
-                            0xf1 => self.call(&mut self.access_list)?, // CALL with EIP-2929
-                            0xf2 => self.callcode(&mut self.access_list)?, // CALLCODE with EIP-2929
+                            0xf1 => self.call()?, // CALL with EIP-2929
+                            0xf2 => self.callcode()?, // CALLCODE with EIP-2929
                             0xf3 => {
                                 let pos_to_return = u256::u256_to_u64(self.pop()?) as usize;
                                 let len_to_return = u256::u256_to_u64(self.pop()?) as usize;
                                 return Ok(self.mem[pos_to_return..pos_to_return + len_to_return].to_vec());
                             }
-                            0xf4 => self.delegatecall(&mut self.access_list)?, // DELEGATECALL with EIP-2929
+                            0xf4 => self.delegatecall()?, // DELEGATECALL with EIP-2929
                             _ => return Err(format!("unimplemented {:x}", opcode)),
                         }
                         self.pc += 1;
@@ -794,4 +849,15 @@ impl Stack {
     pub fn vec_u8_to_hex(bytes: Vec<u8>) -> String {
         let strs: Vec<String> = bytes.iter().map(|b| format!("{:02X}", b)).collect();
         strs.join("")
+    }
+
+    pub fn valid_dest(code: &[u8], pos: usize) -> bool {
+        if code[pos] == 0x5b {
+            return true;
+        }
+        false
+    }
+
+    pub fn upper_multiple_of_32(n: usize) -> usize {
+        ((n - 1) | 31) + 1
     }
