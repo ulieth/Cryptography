@@ -145,18 +145,6 @@ impl Stack {
         }
         Ok(self.stack[self.stack.len() - 1])
     }
-    pub fn substract_gas(&mut self, val: u64) -> Result<(), String> {
-        if self.gas < val {
-            return Err("out of gas".to_string());
-        }
-        self.gas -= val;
-        Ok(())
-    }
-
-
-
-
-
 
     // EXTCODESIZE (0x3b)
     pub fn extcodesize(&mut self) -> Result<(), String> {
@@ -616,6 +604,13 @@ impl Stack {
         }
         Ok(())
     }
+    pub fn substract_gas(&mut self, value: u64) -> Result<(), String> {
+        if self.gas < value {
+            return Err("out of gas".to_string());
+        }
+        self.gas -= value;
+        Ok(())
+    }
 
         pub fn execute(
             &mut self,
@@ -762,6 +757,7 @@ impl Stack {
                         return Err(format!("unimplemented {:x}", opcode));
                     }
                 }
+                self.substract_gas(self.opcodes.get(&opcode).unwrap().gas)?;
             }
             Ok(Vec::new())
         }
