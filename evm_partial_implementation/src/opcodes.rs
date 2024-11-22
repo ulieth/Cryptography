@@ -1,31 +1,25 @@
-/// This module implements a basic Ethereum Virtual Machine (EVM) opcode interpreter.
-///
-/// It defines gas costs for various operations, such as arithmetic, storage, and contract execution.
-/// The `Opcode` struct encapsulates information about each opcode, including its name, number of inputs
-/// and outputs, and associated gas costs.
-///
-/// The `new_opcodes` function initializes a mapping of opcodes to their corresponding operations, such
-/// as ADD, SUB, CALL, and LOG. The stack operations include standard arithmetic functions, boolean
-/// logic, and memory manipulation functions like MLOAD and MSTORE.
-///
-/// This interpreter handles gas calculation based on EVM specifications, allowing for the simulation
-/// of smart contract execution.
+// This module implements a basic Ethereum Virtual Machine (EVM) opcode interpreter.
+//
+// It defines gas costs for various operations, such as arithmetic, storage, and contract execution.
+// The `Opcode` struct encapsulates information about each opcode, including its name, number of inputs
+// and outputs, and associated gas costs.
+//
+// The `new_opcodes` function initializes a mapping of opcodes to their corresponding operations, such
+// as ADD, SUB, CALL, and LOG. The stack operations include standard arithmetic functions, boolean
+// logic, and memory manipulation functions like MLOAD and MSTORE.
+//
+// This interpreter handles gas calculation based on EVM specifications, allowing for the simulation
+// of smart contract execution.
 
-/// The general gas cost function, C, for EVM operations is defined in the Yellow Paper as:
-/// C(σ, μ, A, I) ≡ Cmem(μ′i) − Cmem(μi) plus additional costs associated with specific operations.
-/// These operations, such as SELFDESTRUCT, are assigned different weights based on their computational costs.
-/// For example, operations in Wzero (e.g., STOP, RETURN, REVERT) have lower costs, while those in Whigh (e.g., JUMPI) have higher costs.
+// The general gas cost function, C, for EVM operations is defined in the Yellow Paper as:
+// C(σ, μ, A, I) ≡ Cmem(μ′i) − Cmem(μi) plus additional costs associated with specific operations.
+// For example, operations in Wzero (e.g., STOP, RETURN, REVERT) have lower costs, while those in Whigh (e.g., JUMPI) have higher costs.
 
-use super::*;
-use std::collections::{HashMap, HashSet};
-use crate::types::{Address, H256};
-use num_bigint::BigUint;
-use num_traits::identities::Zero;
 // Constants representing gas prices for various operations in the Ethereum Virtual Machine (EVM).
 // These values are derived from the Ethereum Yellow Paper and Ethereum Improvement Proposals (EIPs).
 // They serve to quantify the computational cost of executing operations, ensuring fair resource allocation
 // and preventing abuse of the network.
-
+use std::collections::HashMap;
 // Base costs
 pub const GDEFAULT: u64 = 1;
 pub const GMEMORY: u64 = 3;
@@ -45,7 +39,7 @@ pub const SSTORE_CLEARS_SCHEDULE: u64 = 4800; // EIP-3529 reduced refund
 
 // Memory and copy costs
 pub const GCOPY: u64 = 3;
-pub const GEXPONENTBYTE: u64 = 10;
+pub const GEXPONENTBYTE: u64 = 50; // ???
 pub const EXP_SUPPLEMENTAL_GAS: u64 = 40;
 
 // Contract operations
@@ -210,15 +204,4 @@ pub fn new_opcodes() -> HashMap<u8, Opcode> {
     opcodes.insert(0xa4, new_opcode("LOG4", 6, 0, 1875));
 
     opcodes
-}
-
-fn valid_dest(code: &[u8], pos: usize) -> bool {
-    if code[pos] == 0x5b {
-        return true;
-    }
-    false
-}
-
-fn upper_multiple_of_32(n: usize) -> usize {
-    ((n - 1) | 31) + 1
 }
