@@ -92,7 +92,6 @@ impl Stack {
     pub fn print_stack(&self) {
         println!("stack ({}):", self.stack.len());
         for i in (0..self.stack.len()).rev() {
-            // println!("{:x}", &self.stack[i][28..]);
             println!("{:?}", vec_u8_to_hex(self.stack[i].to_vec()));
         }
     }
@@ -114,16 +113,22 @@ impl Stack {
             }
         }
     }
-    pub fn push(&mut self, value: [u8; 32]) {
-        self.stack.push(H256::from(value));
-    }
-    // push_arbitrary performs a push, but first converting the arbitrary-length
-    // input into a 32 byte array
+    // Pushes an arbitrary length byte slice onto the stack
+    // Pads with leading zeros to make it 32 bytes
+    // Used by PUSH1-PUSH32 operations
     pub fn push_arbitrary(&mut self, b: &[u8]) {
         // TODO if b.len()>32 return error
-        let mut d: [u8; 32] = [0; 32];
+        let mut d: [u8; 32] = [0; 32]; // Create zero-filled 32-byte array
+        // Copy input bytes to end of array
+        // Example: for 1 byte input 0x12
+        // d becomes: [0,0,0,...,0,0x12]
         d[32 - b.len()..].copy_from_slice(b);
         self.stack.push(d);
+    }
+    // Pushes a full 32-byte array onto the stack
+    // Converts the input [u8; 32] array to H256 type before pushing
+    pub fn push(&mut self, value: [u8; 32]) {
+      self.stack.push(H256::from(value));
     }
     // put_arbitrary puts in the last element of the stack the value
     pub fn put_arbitrary(&mut self, b: &[u8]) {
@@ -137,8 +142,9 @@ impl Stack {
     pub fn pop(&mut self) -> Result<[u8; 32], String> {
         self.stack.pop()
             .map(|h| h.into())
-            .ok_or_else(|| "pop err".to_string())
+            .ok_or_else(|| "The stack is empty".to_string())
     }
+    // `peek()` looks at top of stack without removing the value
     pub fn peek(&mut self) -> Result<[u8; 32], String> {
         if self.stack.is_empty() {
             return Err("peek err".to_string());
@@ -545,11 +551,15 @@ impl Stack {
 
     // storage and execution
     pub fn extend_mem(&mut self, start: usize, size: usize) {
+        // Skip if no expansion needed
         if size <= self.mem.len() || start + size <= self.mem.len() {
             return;
         }
+        // Calculate sizes in 32-byte words
         let old_size = self.mem.len() / 32;
         let new_size = upper_multiple_of_32(start + size) / 32;
+        // Calculate gas fees
+        // Old fee = linear cost + quadratic cost
         let old_total_fee = (old_size * GMEMORY as usize + old_size.pow(2) / GQUADRATICMEMDENOM as usize) as u64;
         let new_total_fee = (new_size * GMEMORY as usize + new_size.pow(2) / GQUADRATICMEMDENOM as usize) as u64;
         let mem_fee = new_total_fee - old_total_fee;
@@ -599,33 +609,42 @@ impl Stack {
         Ok(())
     }
     pub fn jump_dest(&mut self) -> Result<(), String> {
-        if self.pc >= self.code.len() || self.code[self.pc] != 0x5b {
-            return Err("invalid JUMPDEST".to_string());
-        }
-        Ok(())
+      if self.pc < self.code.len() {
+          println!("Byte at pc: 0x{:02x}", self.code[self.pc]);
+      }
+      // Check bounds
+      if self.pc >= self.code.len() {
+          return Err("JUMPDEST: pc out of bounds".to_string());
+      }
+      // Check if current instruction is JUMPDEST (0x5b)
+      if self.code[self.pc] != 0x5b {
+          return Err(format!("Invalid JUMPDEST: found 0x{:02x} at position {}",
+              self.code[self.pc], self.pc));
+      }
+      Ok(())
     }
     pub fn substract_gas(&mut self, value: u64) -> Result<(), String> {
         if self.gas < value {
-            return Err("out of gas".to_string());
+            return Err("Out of gas".to_string());
         }
         self.gas -= value;
         Ok(())
     }
-
-        pub fn execute(
-            &mut self,
-            code: &[u8],
-            calldata: &[u8],
-            debug: bool,
+    pub fn execute(
+        &mut self,
+        code: &[u8],
+        calldata: &[u8],
+        debug: bool,
         ) -> Result<Vec<u8>, String> {
             self.pc = 0;
             self.calldata_i = 0;
+            self.code = code.to_vec();
             let l = code.len();
 
             while self.pc < l {
                 let opcode = code[self.pc];
                 if !self.opcodes.contains_key(&opcode) {
-                    return Err(format!("invalid opcode {:x}", opcode));
+                    return Err(format!("Invalid opcode {:x}", opcode));
                 }
 
                 if debug {
@@ -645,7 +664,7 @@ impl Stack {
                 // Get base gas cost
                 let base_gas = self.opcodes.get(&opcode).unwrap().gas;
 
-                match opcode & 0xf0 {
+                match opcode & 0xf0 /* the use of mask to match the pattern */ {
                     0x00 => {
                         // arithmetic operations
                         match opcode {
@@ -699,21 +718,29 @@ impl Stack {
                         self.pc += 1;
                     }
                     0x50 => {
-                        self.pc += 1;
                         match opcode {
-                            0x51 => self.mload()?,
-                            0x52 => self.mstore()?,
-                            0x54 => self.sload()?, // SLOAD with EIP-2929
-                            0x55 => self.sstore()?, // SSTORE with EIP-2929
-                            0x56 => self.jump(code)?,
-                            0x57 => self.jump_i(code)?,
-                            0x5b => self.jump_dest()?,
-                            _ => return Err(format!("unimplemented {:x}", opcode)),
+                            0x5b => self.jump_dest()?,  // Handle JUMPDEST first without PC increment
+                            _ => {
+                                self.pc += 1;  // Increment PC for all other 0x50 opcodes
+                                match opcode {
+                                    0x51 => self.mload()?,
+                                    0x52 => self.mstore()?,
+                                    0x54 => self.sload()?,
+                                    0x55 => self.sstore()?,
+                                    0x56 => self.jump(code)?,
+                                    0x57 => self.jump_i(code)?,
+                                    _ => return Err(format!("unimplemented {:x}", opcode)),
+                                }
+                            }
+                        }
+                        // Increment PC only for JUMPDEST after validation
+                        if opcode == 0x5b {
+                            self.pc += 1;
                         }
                     }
                     0x60 | 0x70 => {
                         // push operations
-                        let n = (opcode - 0x5f) as usize;
+                        let n = (opcode - 0x5f) as usize; // depends on the number of PUSH{} args
                         self.push_arbitrary(&code[self.pc + 1..self.pc + 1 + n]);
                         self.pc += 1 + n;
                     }
@@ -757,34 +784,34 @@ impl Stack {
                         return Err(format!("unimplemented {:x}", opcode));
                     }
                 }
-                self.substract_gas(self.opcodes.get(&opcode).unwrap().gas)?;
+                self.substract_gas(base_gas)?;
             }
             Ok(Vec::new())
         }
 
-        pub fn sstore(&mut self) -> Result<(), String> {
-          let key: H256 = self.pop()?.into();
-          let value = self.pop()?;
+    pub fn sstore(&mut self) -> Result<(), String> {
+        let key: H256 = self.pop()?.into();
+        let value = self.pop()?;
 
-          // Check cold/warm access
-          let access_cost = if self.access_list.is_storage_cold(&self.current_address, &key) {
-              self.access_list.mark_storage_warm(self.current_address, key);
-              opcodes::COLD_SLOAD_COST
-          } else {
-              opcodes::WARM_STORAGE_READ_COST
-          };
+        // Check cold/warm access
+        let access_cost = if self.access_list.is_storage_cold(&self.current_address, &key) {
+            self.access_list.mark_storage_warm(self.current_address, key);
+            opcodes::COLD_SLOAD_COST
+        } else {
+            opcodes::WARM_STORAGE_READ_COST
+        };
 
-          self.gas -= access_cost;
+        self.gas -= access_cost;
 
-          let original = self.storage_committed.get(&key).cloned();
-          let current = self.storage.get(&key).cloned();
+        let original = self.storage_committed.get(&key).cloned();
+        let current = self.storage.get(&key).cloned();
 
-          // Calculate gas and refund per EIP-3529
-          let (gas_cost, refund) = self.calculate_sstore_gas_and_refund(
-              &original,
-              &current,
-              &value.to_vec()
-          );
+        // Calculate gas and refund per EIP-3529
+        let (gas_cost, refund) = self.calculate_sstore_gas_and_refund(
+            &original,
+            &current,
+            &value.to_vec()
+        );
 
           self.gas -= gas_cost;
           self.refund += refund;
