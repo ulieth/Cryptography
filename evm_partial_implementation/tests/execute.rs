@@ -22,6 +22,7 @@ fn execute_opcodes_0() {
     assert_eq!(s.pc, 5);  // Check program counter position
 }
 #[test]
+// MSTORE and RETURN operations
 fn execute_opcodes_1() {
     let mut s = Stack::new();
     // Code: PUSH1 5 (0x60, 0x05), PUSH1 4 (0x60, 0x04), ADD (0x01), PUSH1 0 (0x60, 0x00)
@@ -33,37 +34,65 @@ fn execute_opcodes_1() {
     assert_eq!(out[0], 0x09);
     assert_eq!(s.gas, 9999999976);
     assert_eq!(s.pc, 12);
-    assert_eq!(s.pop(), Err("pop err".to_string())); // TODO expect error as stack is empty
+    assert_eq!(s.pop(), Err("The stack is empty".to_string()));
 
 }
-
 #[test]
+// PUSH2 and ADD operations
 fn execute_opcodes_2() {
-
-    let code = hex::decode("61010161010201").unwrap();
-    let calldata = vec![];
-
     let mut s = Stack::new();
+    // Code: PUSH2 257 (0x61 0x0101), PUSH2 258 (0x61 0x0102), ADD (0x01)
+    let code = hex::decode("61010161010201").unwrap();
+    let calldata = vec![];  // No calldata needed for this test
+    s.execute(&code, &calldata, false).unwrap();
+    assert_eq!(s.gas, 9999999991);  // Check remaining gas
+    assert_eq!(s.pc, 7);  // Program counter should be at the end (2 PUSH2s = 3 bytes each + 1 ADD)
+    assert_eq!(s.pop().unwrap(), u256::str_to_u256("515")); // 257 + 258 = 515
+}
+#[test]
+// CALLDATALOAD
+fn execute_opcodes_3() {
+    let mut s = Stack::new();
+    // Code: PUSH1 0 (0x60, 0x00), CALLDATALOAD (0x35), PUSH1 32 (0x60, 0x20),
+    // CALLDATALOAD (0x35), ADD (0x01)
+    let code = hex::decode("60003560203501").unwrap();
+
+    // Calldata contains two 32-byte values: 5 and 4
+    let calldata = hex::decode("00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000004").unwrap();
+
     s.execute(&code, &calldata, false).unwrap();
 
-    // assert_eq!(out[0], 0x09);
-    assert_eq!(s.gas, 9999999991);
+    assert_eq!(s.gas, 9999999985);
     assert_eq!(s.pc, 7);
-    assert_eq!(s.pop().unwrap(), u256::str_to_u256("515"));
+    assert_eq!(s.pop().unwrap(), u256::str_to_u256("9")); // 5 + 4 = 9
 }
 #[test]
-fn execute_opcodes_3() {
-   let mut s = Stack::new();
-   // Code: PUSH1 0 (0x60, 0x00), CALLDATALOAD (0x35), PUSH1 32 (0x60, 0x20),
-   // CALLDATALOAD (0x35), ADD (0x01)
-   let code = hex::decode("60003560203501").unwrap();
+// The code implements a countdown loop from 5 to 0
+// using JUMPI to loop back to JUMPDEST while value is not zero.
+fn execute_opcodes_4() {
+    let mut s = Stack::new();
+    // Code: PUSH1 0 (0x60, 0x00) - Push 0 for CALLDATALOAD position
+    // CALLDATALOAD (0x35) - Load value from calldata - gets 5
+    // PUSH1 0 (0x60, 0x00) - Push memory position 0
+    // MSTORE (0x52) - Store value in memory at position 0
+    // JUMPDEST (0x5b) - Mark valid jump destination for loop
+    // PUSH1 1 (0x60, 0x01) - Push value 1 for subtraction
+    // PUSH1 0 (0x60, 0x00) - Push memory position 0
+    // MLOAD (0x51) - Load current value from memory
+    // SUB (0x03) - Subtract 1 from current value
+    // PUSH1 0 (0x60, 0x00) - Push memory position 0
+    // MSTORE (0x52) - Store decremented value back to memory
+    // PUSH1 0 (0x60, 0x00) - Push memory position 0
+    // MLOAD (0x51) - Load value for comparison
+    // PUSH1 6 (0x60, 0x06) - Push jump destination (position of JUMPDEST)
+    // JUMPI (0x57) - Jump back to JUMPDEST if value is not zero
+    let code = hex::decode("6000356000525b600160005103600052600051600657").unwrap();
 
-   // Calldata contains two 32-byte values: 5 and 4
-   let calldata = hex::decode("00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000004").unwrap();
+    // Calldata: 32-byte value of 5 padded with zeros
+    let calldata = hex::decode("0000000000000000000000000000000000000000000000000000000000000005").unwrap();
 
-   s.execute(&code, &calldata, false).unwrap();
-
-   assert_eq!(s.gas, 9999999985);
-   assert_eq!(s.pc, 7);
-   assert_eq!(s.pop().unwrap(), u256::str_to_u256("9")); // 5 + 4 = 9
+    s.execute(&code, &calldata, false).unwrap();
+    assert_eq!(s.gas, 9999999795);  // Check gas after loop
+    assert_eq!(s.pc, 22);           // Check final program counter
+    assert_eq!(s.stack.len(), 0);   // Stack should be empty after loop
 }
