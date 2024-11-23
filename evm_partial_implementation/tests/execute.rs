@@ -96,3 +96,49 @@ fn execute_opcodes_4() {
     assert_eq!(s.pc, 22);           // Check final program counter
     assert_eq!(s.stack.len(), 0);   // Stack should be empty after loop
 }
+#[test]
+// countdown loop without memory
+fn execute_opcodes_5() {
+    // contains loops, without using mem
+    // Code: PUSH1 0 (0x60, 0x00) - Push 0 for CALLDATALOAD position
+    // CALLDATALOAD (0x35) - Load value from calldata
+    // JUMPDEST (0x5b) - Mark valid jump destination for loop //
+    // PUSH1 1 (0x60, 0x01) - Push value 1
+    // SWAP1 (0x90) - Swap counter with 1
+    // SUB (0x03) - Subtract 1 from counter
+    // DUP1 (0x80) - Duplicate counter for comparison
+    // PUSH1 3 (0x60, 0x03) - Push jump destination
+    // JUMPI (0x57) - Jump back if counter not zero
+    let code = hex::decode("6000355b6001900380600357").unwrap();
+    // Single interation
+    let calldata =
+        hex::decode("0000000000000000000000000000000000000000000000000000000000000001").unwrap();
+
+    let mut s = Stack::new();
+    s.execute(&code, &calldata, false).unwrap();
+
+    assert_eq!(s.gas, 9999999968);
+    assert_eq!(s.pc, 12);
+
+    let code = hex::decode("6000355b6001900380600357").unwrap();
+    // Two iterations
+    let calldata =
+        hex::decode("0000000000000000000000000000000000000000000000000000000000000002").unwrap();
+
+    let mut s = Stack::new();
+    s.execute(&code, &calldata, false).unwrap();
+
+    assert_eq!(s.gas, 9999999942);
+    assert_eq!(s.pc, 12);
+
+    let code = hex::decode("6000355b6001900380600357").unwrap();
+    // Five iterations
+    let calldata =
+        hex::decode("0000000000000000000000000000000000000000000000000000000000000005").unwrap();
+
+    let mut s = Stack::new();
+    s.execute(&code, &calldata, false).unwrap();
+
+    assert_eq!(s.gas, 9999999864);
+    assert_eq!(s.pc, 12);
+}
