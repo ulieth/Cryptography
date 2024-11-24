@@ -173,3 +173,25 @@ fn execute_opcodes_6() {
     );
     assert_eq!(out, hex::decode("6005600401").unwrap());
 }
+// Testing exceptions
+#[test]
+fn execute_exceptions() {
+    let mut s = Stack::new();
+    let calldata = hex::decode("").unwrap();
+    let code = hex::decode("5f").unwrap();
+    let out = s.execute(&code, &calldata, false);
+    assert_eq!(out, Err(format!("unimplemented 5f")));
+
+    let code = hex::decode("56").unwrap();
+    let out = s.execute(&code, &calldata, false);
+    assert_eq!(out, Err(format!("The stack is empty")));
+
+    let code = hex::decode("600056").unwrap();
+    let out = s.execute(&code, &calldata, false);
+    assert_eq!(out, Err(format!("not valid dest: 00")));
+
+    s.gas = 1;
+    let code = hex::decode("6000").unwrap();
+    let out = s.execute(&code, &calldata, false);
+    assert_eq!(out, Err(format!("Out of gas")));
+}
