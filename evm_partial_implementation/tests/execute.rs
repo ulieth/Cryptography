@@ -6,9 +6,9 @@ fn create_test_stack(address: [u8; 20]) -> Stack {
     s.current_address = address;
     s
 }
-// arithmetic operations
+// Arithmetic operations
 #[test]
-// add operation
+// Add operation
 fn execute_opcodes_0() {
     let mut s = Stack::new();
     // Code: PUSH1 5 (0x60, 0x05), PUSH1 12 (0x60, 0x0c), ADD (0x01)
@@ -97,7 +97,7 @@ fn execute_opcodes_4() {
     assert_eq!(s.stack.len(), 0);   // Stack should be empty after loop
 }
 #[test]
-// countdown loop without memory
+// Countdown loop without memory
 fn execute_opcodes_5() {
     // contains loops, without using mem
     // Code: PUSH1 0 (0x60, 0x00) - Push 0 for CALLDATALOAD position
@@ -141,4 +141,35 @@ fn execute_opcodes_5() {
 
     assert_eq!(s.gas, 9999999864);
     assert_eq!(s.pc, 12);
+}
+
+#[test]
+// This test simulates a contract deployment sequence
+fn execute_opcodes_6() {
+    // PUSH1 0x05 (0x60, 0x05) - Push 5 onto stack (length of runtime code)
+    // DUP1 (0x80) - Duplicate the value 5
+    // PUSH1 0x0b (0x60, 0x0b) - Push 11 onto stack (offset for runtime code)
+    // PUSH1 0x00 (0x60, 0x00) - Push 0 onto stack (destination in memory)
+    // CODECOPY (0x39) - Copy runtime code to memory
+    // PUSH1 0x00 (0x60, 0x00) - Push 0 onto stack (offset in memory)
+    // RETURN (0xf3) - Return runtime code from memory
+    // Runtime code:
+    // PUSH1 0x05 (0x60, 0x05) - Push 5
+    // PUSH1 0x04 (0x60, 0x04) - Push 4
+    // ADD (0x01) - Add 5 + 4
+    let code = hex::decode("600580600b6000396000f36005600401").unwrap();
+    let calldata = hex::decode("").unwrap();
+
+    let mut s = Stack::new();
+    let out = s.execute(&code, &calldata, true).unwrap();
+
+    assert_eq!(s.gas, 9999999976);
+    assert_eq!(s.pc, 10);
+    assert_eq!(s.stack.len(), 0);
+    assert_eq!(s.mem.len(), 32);
+    assert_eq!(
+        s.mem,
+        hex::decode("6005600401000000000000000000000000000000000000000000000000000000").unwrap()
+    );
+    assert_eq!(out, hex::decode("6005600401").unwrap());
 }
