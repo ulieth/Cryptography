@@ -1,11 +1,11 @@
-use evm_partial_implementation::{Stack, u256, opcodes};
+use evm_partial_implementation::{Stack, AccessList, u256, opcodes};
+use evm_partial_implementation::opcodes::{
+  COLD_SLOAD_COST,
+  WARM_STORAGE_READ_COST,
+  COLD_ACCOUNT_ACCESS_COST,
+  WARM_ACCOUNT_ACCESS_COST,
+};
 
-// Helper function for test_access_list_behavior test
-fn create_test_stack(address: [u8; 20]) -> Stack {
-    let mut s = Stack::new();
-    s.current_address = address;
-    s
-}
 // Arithmetic operations
 #[test]
 // Add operation
@@ -172,6 +172,36 @@ fn execute_opcodes_6() {
         hex::decode("6005600401000000000000000000000000000000000000000000000000000000").unwrap()
     );
     assert_eq!(out, hex::decode("6005600401").unwrap());
+}
+#[test]
+// SLOAD cold, SLOAD warm (same slot), SLOAD cold (different slot)
+fn execute_opcodes_7() {
+    let mut s = Stack::new();
+    // PUSH1 0x01 (0x60 0x01) - slot 1
+    // SLOAD (0x54) - cold access
+    // PUSH1 0x01 (0x60 0x01) - slot 1 again
+    // SLOAD (0x54) - warm access
+    // PUSH1 0x02 (0x60 0x02) - slot 2
+    // SLOAD (0x54) - cold access
+    let code = hex::decode("600154600154600254").unwrap();
+    let calldata = vec![];
+    let initial_gas = s.gas;
+    s.execute(&code, &calldata, false).unwrap();
+
+    // Calculate gas usage
+    let total_gas_used = initial_gas - s.gas;
+
+    // Expected gas costs:
+    // 1. First SLOAD: COLD_SLOAD_COST + PUSH1 base cost (3)
+    // 2. Second SLOAD: WARM_STORAGE_READ_COST + PUSH1 base cost (3)
+    // 3. Third SLOAD: COLD_SLOAD_COST + PUSH1 base cost (3)
+    let expected_min_gas = COLD_SLOAD_COST + WARM_STORAGE_READ_COST + COLD_SLOAD_COST + 9; // 9 for three PUSH1 operations
+
+    // Verify total gas usage
+    assert!(total_gas_used >= expected_min_gas);
+
+    // Verify program counter reached the end
+    assert_eq!(s.pc, code.len());
 }
 // Testing exceptions
 #[test]
