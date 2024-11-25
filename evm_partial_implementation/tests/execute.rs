@@ -203,6 +203,49 @@ fn execute_opcodes_7() {
     // Verify program counter reached the end
     assert_eq!(s.pc, code.len());
 }
+#[test]
+// memory extension
+fn execute_opcodes_8() {
+    let mut s = Stack::new();
+    // PUSH2 0x1000 (0x61 0x1000)  4096
+    // DUP1 (0x80) - Duplicate top value
+    // MLOAD (0x51) - Load from memory at offset 0x1000
+    // MLOAD (0x51) - Load from memory at same offset
+    let code = hex::decode("611000805151").unwrap();
+    let calldata = vec![];
+
+    s.execute(&code, &calldata, false).unwrap();
+
+    // Gas checks:
+    // - PUSH2: 3 gas
+    // - DUP1: 3 gas
+    // - First MLOAD: extends memory to 4096 + 32 = 4128 bytes
+    //   Memory expansion cost = (⌊4128 / 32⌋) * 3 + (⌊4128 / 32⌋)^2 / 512
+    // - Second MLOAD: uses same memory size, only base cost
+    // Initial gas: 10000000000
+    // Expected remaining: 9999999569
+    assert_eq!(s.gas, 9999999569);
+
+    // Program counter should be at the end of code
+    assert_eq!(s.pc, 6);
+
+    // Stack should contain:
+    // - Value loaded by second MLOAD
+    // - Value loaded by first MLOAD
+    assert_eq!(s.stack.len(), 2);
+
+    // Memory should be extended to handle MLOAD at offset 0x1000 (4096)
+    // Plus 32 bytes for the word size = 4128
+    assert_eq!(s.mem.len(), 4128);
+}
+
+
+
+
+
+
+
+
 // Testing exceptions
 #[test]
 fn execute_exceptions() {
