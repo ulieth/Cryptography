@@ -1,9 +1,7 @@
-use evm_partial_implementation::{Stack, AccessList, u256, opcodes};
+use evm_partial_implementation::{Stack, u256};
 use evm_partial_implementation::opcodes::{
   COLD_SLOAD_COST,
   WARM_STORAGE_READ_COST,
-  COLD_ACCOUNT_ACCESS_COST,
-  WARM_ACCOUNT_ACCESS_COST,
 };
 
 // Arithmetic operations
@@ -238,14 +236,6 @@ fn execute_opcodes_8() {
     // Plus 32 bytes for the word size = 4128
     assert_eq!(s.mem.len(), 4128);
 }
-
-
-
-
-
-
-
-
 // Testing exceptions
 #[test]
 fn execute_exceptions() {
