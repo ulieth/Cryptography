@@ -39,13 +39,13 @@ impl AccessList {
     pub fn is_cold_address(&self, address: &Address) -> bool {
         !self.addresses.contains(address)
     }
+    pub fn mark_address_warm(&mut self, address: Address) {
+      self.addresses.insert(address);
+    }
     pub fn is_cold_slot(&self, address: &Address, slot: &H256) -> bool {
         !self.storage
             .get(address)
             .map_or(false, |slots| slots.contains(slot))
-    }
-    pub fn mark_address_warm(&mut self, address: Address) {
-        self.addresses.insert(address);
     }
     pub fn mark_slot_warm(&mut self, address: Address, slot: H256) {
         self.storage.entry(address).or_default().insert(slot);
@@ -123,10 +123,8 @@ impl Stack {
         // Example: for 1 byte input 0x12
         // d becomes: [0,0,0,...,0,0x12]
         d[32 - b.len()..].copy_from_slice(b);
-        self.stack.push(d);
+        self.stack.push(H256::from(d));
     }
-    // Pushes a full 32-byte array onto the stack
-    // Converts the input [u8; 32] array to H256 type before pushing
     pub fn push(&mut self, value: [u8; 32]) {
       self.stack.push(H256::from(value));
     }
@@ -134,9 +132,9 @@ impl Stack {
     pub fn put_arbitrary(&mut self, b: &[u8]) {
         // TODO if b.len()>32 return error
         let mut d: [u8; 32] = [0; 32];
-        d[0..b.len()].copy_from_slice(b); // put without left padding
+        d[32 - b.len()..].copy_from_slice(b); // put without left padding
         let l = self.stack.len();
-        self.stack[l - 1] = d;
+        self.stack[l - 1] = H256::from(d);
     }
 
     pub fn pop(&mut self) -> Result<[u8; 32], String> {
@@ -172,6 +170,7 @@ impl Stack {
         Ok(())
     }
     // EXTCODECOPY (0x3c)
+    // Simplified implementation that just zeros the memory
     pub fn extcodecopy(&mut self) -> Result<(), String> {
         let mut address: Address = [0u8; 20];
         address.copy_from_slice(&self.pop()?[12..32]);
@@ -183,23 +182,35 @@ impl Stack {
         let access_cost = if self.access_list.is_cold_address(&address) {
         self.access_list.mark_address_warm(address);
         opcodes::COLD_ACCOUNT_ACCESS_COST
-      } else {
-          opcodes::WARM_ACCOUNT_ACCESS_COST
-      };
-      self.gas -= access_cost;
+        } else {
+              opcodes::WARM_ACCOUNT_ACCESS_COST
+        };
+        self.gas -= access_cost;
 
-      self.extend_mem(dest_offset, length);
-      self.spend_gas_data_copy(length);
+        self.extend_mem(dest_offset, length);
+        self.spend_gas_data_copy(length);
 
-      // Zero memory for now
-      for i in 0..length {
-          self.mem[dest_offset + i] = 0;
-      }
+        // Zero memory for now
+        for i in 0..length {
+            self.mem[dest_offset + i] = 0;
+        }
+      // In real implementation, would do something like:
+      // 1. Get external code
+      // let external_code = self.get_external_code(address)?;
+      // 2. Copy code to memory
+      // for i in 0..length {
+      //     self.mem[dest_offset + i] = if offset + i < external_code.len() {
+      //         external_code[offset + i]
+      //     } else {
+      //         0 // Pad with zeros if reading past code end
+      //     };
+      //  }
 
       Ok(())
     }
 
     // EXTCODEHASH (0x3f)
+    // Simplified implementation
     pub fn extcodehash(&mut self) -> Result<(), String> {
         let mut address: Address = [0u8; 20];
         address.copy_from_slice(&self.pop()?[12..32]);
@@ -212,9 +223,22 @@ impl Stack {
         };
         self.gas -= access_cost;
 
+        // let code_hash = self.get_code_hash(address)?;
+        // self.push(code_hash);
         self.push([0u8; 32]);
         Ok(())
     }
+    // fn get_code_hash(&self, address: Address) -> Result<[u8; 32], String> {
+        // In real implementation:
+        // 1. Get account from state
+        // 2. If account doesn't exist, return empty hash
+        // 3. If account exists but has no code, return hash of empty string
+        // 4. Otherwise return code hash from account
+
+      // use sha3::{Digest, Keccak256};
+      // let empty_hash = Keccak256::digest(&[]).try_into().unwrap();
+      //Ok(empty_hash)
+    // }
 
     // CALL (0xf1)
     pub fn call(&mut self) -> Result<(), String> {
@@ -270,7 +294,6 @@ impl Stack {
 
     // DELEGATECALL (0xf4)
     pub fn delegatecall(&mut self) -> Result<(), String> {
-        let gas = u256::u256_to_u64(self.pop()?);
         let mut address: Address = [0u8; 20];
         address.copy_from_slice(&self.pop()?[12..32]);
         let args_offset = u256::u256_to_u64(self.pop()?) as usize;
@@ -363,6 +386,7 @@ impl Stack {
         Ok(())
     }
     pub fn sub(&mut self) -> Result<(), String> {
+        self.require_stack_items(2)?;
         let b0 = BigUint::from_bytes_be(&self.pop()?[..]);
         let b1 = BigUint::from_bytes_be(&self.pop()?[..]);
         if b0 >= b1 {
@@ -604,24 +628,24 @@ impl Stack {
                 self.pc = new_pc;
             }
         }
-        // let cont = self.pop();
+        // let cond = self.pop();
         // if cont {} // TODO depends on having impl Err in pop()
         Ok(())
     }
     pub fn jump_dest(&mut self) -> Result<(), String> {
-      if self.pc < self.code.len() {
-          println!("Byte at pc: 0x{:02x}", self.code[self.pc]);
-      }
-      // Check bounds
-      if self.pc >= self.code.len() {
-          return Err("JUMPDEST: pc out of bounds".to_string());
-      }
-      // Check if current instruction is JUMPDEST (0x5b)
-      if self.code[self.pc] != 0x5b {
-          return Err(format!("Invalid JUMPDEST: found 0x{:02x} at position {}",
-              self.code[self.pc], self.pc));
-      }
-      Ok(())
+        if self.pc < self.code.len() {
+            println!("Byte at pc: 0x{:02x}", self.code[self.pc]);
+        }
+        // Check bounds
+        if self.pc >= self.code.len() {
+            return Err("JUMPDEST: pc out of bounds".to_string());
+        }
+        // Check if current instruction is JUMPDEST (0x5b)
+        if self.code[self.pc] != 0x5b {
+            return Err(format!("Invalid JUMPDEST: found 0x{:02x} at position {}",
+                self.code[self.pc], self.pc));
+        }
+        Ok(())
     }
     pub fn substract_gas(&mut self, value: u64) -> Result<(), String> {
         if self.gas < value {
@@ -705,14 +729,15 @@ impl Stack {
                         self.pc += 1;
                     }
                     0x30 => {
+                        // environment operations
                         match opcode {
                             0x31 => self.balance()?,
-                            0x35 => self.calldata_load(&calldata)?,
+                            0x35 => self.calldata_load(&calldata)?, // Load call data into stack
                             0x36 => self.calldata_size(&calldata),
-                            0x39 => self.code_copy(&code)?,
-                            0x3b => self.extcodesize()?, // EXTCODESIZE with EIP-2929
-                            0x3c => self.extcodecopy()?, // EXTCODECOPY with EIP-2929
-                            0x3f => self.extcodehash()?, // EXTCODEHASH with EIP-2929
+                            0x39 => self.code_copy(&code)?, // Copy contract code to memory
+                            0x3b => self.extcodesize()?, // Get size of an account's code
+                            0x3c => self.extcodecopy()?, // Copy external contract's code
+                            0x3f => self.extcodehash()?, // Get hash of an account's code
                             _ => return Err(format!("unimplemented {:x}", opcode)),
                         }
                         self.pc += 1;
@@ -740,29 +765,36 @@ impl Stack {
                     }
                     0x60 | 0x70 => {
                         // push operations
-                        let n = (opcode - 0x5f) as usize; // depends on the number of PUSH{} args
+                        let n = (opcode - 0x5f) as usize; // depends on the number of PUSH{i} args
                         self.push_arbitrary(&code[self.pc + 1..self.pc + 1 + n]);
                         self.pc += 1 + n;
                     }
                     0x80 => {
-                        // dup
+                        // DUP operations (0x80-0x8f)
                         let l = self.stack.len();
-                        if opcode > 0x7f {
-                            self.stack.push(self.stack[l - (opcode - 0x7f) as usize]);
-                        } else {
-                            self.stack.push(self.stack[(0x7f - opcode) as usize]);
+                        // Calculate index from top of stack
+                        let pos = l - (opcode - 0x7f) as usize;
+                        // Check if we have enough items
+                        if pos >= l {
+                            return Err(format!("Stack underflow: DUP{} requires {} items but only have {}",
+                                opcode - 0x7f,
+                                opcode - 0x7f,
+                                l));
                         }
+                        // Copy value from calculated position
+                        self.stack.push(self.stack[pos]);
                         self.pc += 1;
                     }
                     0x90 => {
-                        // 0x9x swap
+                        // swap operations
                         let l = self.stack.len();
-                        let pos;
-                        if opcode > 0x8e {
-                            pos = l - (opcode - 0x8e) as usize;
-                        } else {
-                            pos = (0x8e - opcode) as usize;
+                        let n = (opcode - 0x8f) as usize; // Get SWAP number (1-16)
+                        let pos = l - (n + 1); // Position to swap with top
+
+                        if pos >= l {
+                            return Err(format!("Stack underflow: SWAP{} requires {} items", n, n + 1));
                         }
+
                         self.stack.swap(pos, l - 1);
                         self.pc += 1;
                     }
@@ -823,64 +855,61 @@ impl Stack {
               self.storage.insert(key, value.to_vec());
           }
           Ok(())
-      }
-
-      // Helper for SSTORE gas calculation
-      fn calculate_sstore_gas_and_refund(
-          &self,
-          original: &Option<Vec<u8>>,
-          current: &Option<Vec<u8>>,
-          new: &Vec<u8>
-      ) -> (u64, i64) {
-          let is_zero = |v: &Option<Vec<u8>>| v.as_ref().map_or(true, |x| x.iter().all(|&b| b == 0));
-
-          // No-op case
-          if current.as_ref().map(|v| v == new).unwrap_or(false) {
-              return (opcodes::WARM_STORAGE_READ_COST, 0);
-          }
-
-          // First write to slot
-          if current == original {
-              if is_zero(original) {
-                  (opcodes::SSTORE_SET_GAS, 0)
-              } else if new.iter().all(|&x| x == 0) {
-                  (opcodes::SSTORE_RESET_GAS, opcodes::SSTORE_CLEARS_SCHEDULE as i64)
-              } else {
-                  (opcodes::SSTORE_RESET_GAS, 0)
-              }
-          } else {
-              let mut refund = 0;
-              if !is_zero(original) {
-                  if is_zero(current) && !new.iter().all(|&x| x == 0) {
-                      refund -= opcodes::SSTORE_CLEARS_SCHEDULE as i64;
-                  }
-                  if !is_zero(current) && new.iter().all(|&x| x == 0) {
-                      refund += opcodes::SSTORE_CLEARS_SCHEDULE as i64;
-                  }
-              }
-              (opcodes::WARM_STORAGE_READ_COST, refund)
-          }
-      }
-
-      // Calculate final refund (capped at 1/5 of used gas per EIP-3529)
-      pub fn get_final_refund(&self, gas_used: u64) -> u64 {
-          std::cmp::min(self.refund.max(0) as u64, gas_used / 5)
-      }
-
-
     }
+
+    // Helper for SSTORE gas calculation
+    fn calculate_sstore_gas_and_refund(
+        &self,
+        original: &Option<Vec<u8>>,
+        current: &Option<Vec<u8>>,
+        new: &Vec<u8>
+    ) -> (u64, i64) {
+        let is_zero = |v: &Option<Vec<u8>>| v.as_ref().map_or(true, |x| x.iter().all(|&b| b == 0));
+
+        // No-op case
+        if current.as_ref().map(|v| v == new).unwrap_or(false) {
+            return (opcodes::WARM_STORAGE_READ_COST, 0);
+        }
+
+        // First write to slot
+        if current == original {
+            if is_zero(original) {
+                (opcodes::SSTORE_SET_GAS, 0)
+            } else if new.iter().all(|&x| x == 0) {
+                (opcodes::SSTORE_RESET_GAS, opcodes::SSTORE_CLEARS_SCHEDULE as i64)
+            } else {
+                (opcodes::SSTORE_RESET_GAS, 0)
+            }
+        } else {
+            let mut refund = 0;
+            if !is_zero(original) {
+                if is_zero(current) && !new.iter().all(|&x| x == 0) {
+                    refund -= opcodes::SSTORE_CLEARS_SCHEDULE as i64;
+                }
+                if !is_zero(current) && new.iter().all(|&x| x == 0) {
+                    refund += opcodes::SSTORE_CLEARS_SCHEDULE as i64;
+                }
+            }
+            (opcodes::WARM_STORAGE_READ_COST, refund)
+        }
+    }
+
+    // Calculate final refund (capped at 1/5 of used gas per EIP-3529)
+    pub fn get_final_refund(&self, gas_used: u64) -> u64 {
+        std::cmp::min(self.refund.max(0) as u64, gas_used / 5)
+    }
+  }
+
     pub fn vec_u8_to_hex(bytes: Vec<u8>) -> String {
         let strs: Vec<String> = bytes.iter().map(|b| format!("{:02X}", b)).collect();
         strs.join("")
     }
-
     pub fn valid_dest(code: &[u8], pos: usize) -> bool {
         if code[pos] == 0x5b {
             return true;
         }
         false
     }
-
     pub fn upper_multiple_of_32(n: usize) -> usize {
         ((n - 1) | 31) + 1
     }
