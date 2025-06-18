@@ -1,67 +1,51 @@
-extern crate num;
-extern crate num_bigint;
-extern crate num_traits;
-extern crate rand;
-
-use num::pow::pow;
-use num_bigint::RandBigInt;
-
-use num_bigint::{BigInt, ToBigInt};
+use num_bigint::{BigInt, ToBigInt, RandBigInt};
 use num_traits::{One, Zero, Signed};
-
 
 // modular arithmetic for potentially negative numbers
 // ensures the result is always positive by adding m and taking modulus again
 fn modulus(a: &BigInt, m: &BigInt) -> BigInt {
-  ((a % m) + m) % m
+    ((a % m) + m) % m
 }
 
+// k: number of shares needed to reconstruct the secret (threshold);
+// n: number of shares;
+// q: size of finite field;
+// s: secret to share;
 pub fn create(k: u32, n: u32, q: &BigInt, s: &BigInt) -> Vec<[BigInt; 2]> {
-  // k: number of shares needed to reconstruct the secret (threshold);
-  // n: number of shares;
-  // q: size of finite field;
-  // s: secret to share;
-  // the secret s must be less than the field size q for ensuring that the secret
-  // can be represented within the finite field,
-  // as all arithmetic operations will be done modulo q;
-  if s > q {
-      println!("\nERROR: need k<p\n");
-  }
+    // the secret s must be less than the field size q for ensuring that the secret
+    // can be represented within the finite field,
+    // as all arithmetic operations will be done modulo q;
+    if s > q {
+        assert!(s < q, "Secret must be less than field size q");
+    }
+    // The secret sharing is based on a polynomial of degree k - 1.
+    // The basis polynomial is defined as f(x) = s + a_1x + a_2x^2 + ... + a_k-1x^k-1,
+    // where s is a constant term (the secret) and a_1,a_2,...,a_k-1 are randomly generated coefficients.
+    // `polynomial` variable will hold the secret and the randomly generated coefficients.
+    let mut polynomial: Vec<BigInt> = Vec::new();
+    polynomial.push(s.clone()); // the secret s is added as the first element
+    let mut rng = rand::thread_rng(); // a random number generator local to the current thread
+    for _ in 0..(k as usize - 1) {
+        let a = rng.gen_bigint_range(&BigInt::zero(), q); // That guarantees a ∈ [0, q)
+        polynomial.push(a);
+    }
+    // vector `shares` is created to store the calculated share values
+    let mut shares: Vec<BigInt> = Vec::new();
+    // Now that we have the polynomial, we can pick `n` points from it,
+    // using incremental indexes for the `x` coordinate
+    for i in 1..=n {
+        let i_big = BigInt::from(i);
+        let mut share_value: BigInt = Zero::zero();
 
-  // The secret sharing is based on a polynomial of degree k - 1.
-  // The basis polynomial is defined as f(x) = s + a_1x + a_2x^2 + ... + a_k-1x^k-1,
-  // where s is a constant term (the secret) and a_1,a_2,...,a_k-1 are randomly generated coefficients.
-
-  // `polynomial` variable will hold the secret and the randomly generated coefficients.
-  let mut polynomial: Vec<BigInt> = Vec::new();
-  polynomial.push(s.clone()); // the secret s is added as the first element
-  for _ in 0..k as usize - 1 {
-      let mut rng = rand::thread_rng();
-      let a = rng.gen_bigint(1024);
-      polynomial.push(a);
-  }
-
-  // A vector `shares` is created to store the calculated share values.
-  let mut shares: Vec<BigInt> = Vec::new();
-  // Now that we have the polynomial, we can pick `n` points from it,
-  // using incremental indexes for the `x` coordinate
-  for i in 1..n + 1 {
-      let mut share_value: BigInt = Zero::zero();
-      let mut x = 0;
-      for coeff in &polynomial {
-          if x == 0 {
-            share_value = share_value + coeff; // the constant term
-          } else {
-              let i_pow = pow(i, x);
-              let curr_elem = i_pow * coeff;
-              share_value = share_value + curr_elem;
-              share_value = modulus(&share_value, &q);
-          }
-          x = x + 1;
-      }
-      shares.push(share_value);
-  }
-  pack_shares(shares)
+        for (x, coeff) in polynomial.iter().enumerate() {
+            let x_big = BigInt::from(x);
+            let i_pow = i_big.modpow(&x_big, &q);
+            let term = modulus(&(i_pow * coeff), q);
+            share_value = modulus(&(share_value + term), q);
+        }
+        shares.push(share_value);
+    }
+    pack_shares(shares)
 }
 
 // Pairs each share value with its x-coordinate (index)
