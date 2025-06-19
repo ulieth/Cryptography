@@ -15,9 +15,8 @@ pub fn create(k: u32, n: u32, q: &BigInt, s: &BigInt) -> Vec<[BigInt; 2]> {
     // the secret s must be less than the field size q for ensuring that the secret
     // can be represented within the finite field,
     // as all arithmetic operations will be done modulo q;
-    if s > q {
-        assert!(s < q, "Secret must be less than field size q");
-    }
+    assert!(s < q, "Secret must be less than field size q");
+
     // The secret sharing is based on a polynomial of degree k - 1.
     // The basis polynomial is defined as f(x) = s + a_1x + a_2x^2 + ... + a_k-1x^k-1,
     // where s is a constant term (the secret) and a_1,a_2,...,a_k-1 are randomly generated coefficients.
@@ -26,17 +25,18 @@ pub fn create(k: u32, n: u32, q: &BigInt, s: &BigInt) -> Vec<[BigInt; 2]> {
     polynomial.push(s.clone()); // the secret s is added as the first element
     let mut rng = rand::thread_rng(); // a random number generator local to the current thread
     for _ in 0..(k as usize - 1) {
-        let a = rng.gen_bigint_range(&BigInt::zero(), q); // That guarantees a ∈ [0, q)
+        let a = rng.gen_bigint_range(&BigInt::one(), q); // That guarantees a ∈ [1, q)
         polynomial.push(a);
     }
+
     // vector `shares` is created to store the calculated share values
     let mut shares: Vec<BigInt> = Vec::new();
     // Now that we have the polynomial, we can pick `n` points from it,
     // using incremental indexes for the `x` coordinate
+    // Example at the point x = 1: p(1)=14+4⋅1+6⋅1^2=24 (mod 19)=5
     for i in 1..=n {
         let i_big = BigInt::from(i);
         let mut share_value: BigInt = Zero::zero();
-
         for (x, coeff) in polynomial.iter().enumerate() {
             let x_big = BigInt::from(x);
             let i_pow = i_big.modpow(&x_big, &q);
