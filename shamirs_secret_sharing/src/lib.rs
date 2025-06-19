@@ -1,4 +1,4 @@
-use num_bigint::{BigInt, ToBigInt, RandBigInt};
+use num_bigint::{BigInt, RandBigInt};
 use num_traits::{One, Zero, Signed};
 
 // modular arithmetic for potentially negative numbers
@@ -7,11 +7,16 @@ fn modulus(a: &BigInt, m: &BigInt) -> BigInt {
     ((a % m) + m) % m
 }
 
+#[derive(Clone, Debug)]
+pub struct Share {
+  x: BigInt,
+  y: BigInt,
+}
 // k: number of shares needed to reconstruct the secret (threshold);
 // n: number of shares;
 // q: size of finite field;
 // s: secret to share;
-pub fn create(k: u32, n: u32, q: &BigInt, s: &BigInt) -> Vec<[BigInt; 2]> {
+pub fn create(k: u32, n: u32, q: &BigInt, s: &BigInt) -> Vec<Share> {
     // the secret s must be less than the field size q for ensuring that the secret
     // can be represented within the finite field,
     // as all arithmetic operations will be done modulo q;
@@ -50,76 +55,50 @@ pub fn create(k: u32, n: u32, q: &BigInt, s: &BigInt) -> Vec<[BigInt; 2]> {
 
 // Pairs each share value with its x-coordinate (index)
 // These points can be distributed as ‘secret parts’
-// In order to recover the secret, we need at least `k`
+// In order to recover the secret, we need at least `k` parts
 // Then we compute the Lagrange polynomial interpolation to recover the original polynomial
-fn pack_shares(shares: Vec<BigInt>) -> Vec<[BigInt; 2]> {
-    let mut packed_shares: Vec<[BigInt; 2]> = Vec::new();
-    for i in 0..shares.len() {
-      let curr: [BigInt; 2] = [shares[i].clone(), (i + 1).to_bigint().unwrap()];
-      packed_shares.push(curr);
-    }
-    packed_shares
+fn pack_shares(shares: Vec<BigInt>) -> Vec<Share> {
+    shares
+        .into_iter()
+        .enumerate()
+        .map(|(i, s )| Share {x: BigInt::from(i + 1), y: s })
+        .collect()
 }
+
 // Separates packed shares back into values and indices
 // Returns tuple of (values, indices)
-fn unpack_shares(s: Vec<[BigInt; 2]>) -> (Vec<BigInt>, Vec<BigInt>) {
-  let mut shares: Vec<BigInt> = Vec::new();
-  let mut is: Vec<BigInt> = Vec::new();
-  for i in 0..s.len() {
-      shares.push(s[i][0].clone());
-      is.push(s[i][1].clone());
-  }
-  (shares, is)
+fn unpack_shares(s: Vec<Share>) -> (Vec<BigInt>, Vec<BigInt>) {
+  let (indices, values): (Vec<_>, Vec<_>) = s.into_iter()
+      .map(|share| (share.x, share.y))
+      .unzip();
+  (indices, values)
 }
 
-pub fn lagrange_interpolation(q: &BigInt, shares_packed: Vec<[BigInt; 2]>) -> BigInt {
-  // Initializes numerator and denominator for final result
-  let mut res_n: BigInt = Zero::zero();
-  let mut res_d: BigInt = Zero::zero();
+pub fn lagrange_interpolation(q: &BigInt, shares_packed: Vec<Share>) -> BigInt {
+  let mut result = BigInt::zero();
   // Unpacks shares into values and indices
-  let (shares, sh_i) = unpack_shares(shares_packed);
-
+  let (indices, values) = unpack_shares(shares_packed);
   // Computes Lagrange basis polynomials
-  // For each share `i`, calculates: ∏(j≠i) (x - xⱼ)/(xᵢ - xⱼ)
-  for i in 0..shares.len() {
-      let mut lagrange_numerator: BigInt = One::one();
-      let mut lagrange_denominator: BigInt = One::one();
-      for j in 0..shares.len() {
-          if shares[i] != shares[j] {
-              let curr_l_numerator = &sh_i[j];
-              let curr_l_denominator = &sh_i[j] - &sh_i[i];
-              lagrange_numerator = lagrange_numerator * curr_l_numerator;
-              lagrange_denominator = lagrange_denominator * curr_l_denominator;
+  // For each share `i`, calculates: ∏(i≠j) (x - xi)/(xj - xi)
+  for i in 0..values.len() {
+      let mut lagrange_numerator = BigInt::one();
+      let mut lagrange_denominator = BigInt::one();
+
+      for j in 0..values.len() {
+          if i != j {
+              let curr_l_numerator = modulus(&indices[j], q);
+              let curr_l_denominator = modulus(&(&indices[j] - &indices[i]), q);
+              lagrange_numerator = modulus(&(lagrange_numerator * curr_l_numerator), q);
+              lagrange_denominator = modulus(&(lagrange_denominator * curr_l_denominator), q);
           }
       }
-      // Handles division in the finite field
-      // Special case handling when quotient is zero to maintain correctness
-      let numerator: BigInt = &shares[i] * &lagrange_numerator;
-      // The else blocks ensures the polynomial interpolation
-      // maintains the correct contributions despite the zero quotient.
-      let quo: BigInt =
-          (&numerator / &lagrange_denominator) + (&lagrange_denominator) % &lagrange_denominator;
-      if quo != Zero::zero() {
-          res_n = res_n + quo;
-      } else {
-          let res_n_mul_lagrange_den = res_n * &lagrange_denominator;
-          res_n = res_n_mul_lagrange_den + numerator;
-          res_d = res_d + lagrange_denominator;
-      }
+
+      let numerator = modulus(&(&values[i] * &lagrange_numerator), q);
+      let denominator_inv = fermat_inverse(&lagrange_denominator, q);
+      let term = modulus(&(numerator * denominator_inv), q);
+      result = modulus(&(result + term), q);
   }
-  let modinv_mul: BigInt;
-  // When calculating the Lagrange polynomial,
-  // you end up needing to divide the numerator (which includes the y-values)
-  // by the lagrange_denominator to find the polynomial's value at a certain point.
-  // This division, in modular arithmetic, is handled by multiplying by the multiplicative inverse of the denominator.
-  if res_d != Zero::zero() {
-      let modinv = fermat_inverse(&res_d, &q);
-      modinv_mul = res_n * modinv;
-  } else {
-      modinv_mul = res_n;
-  }
-  let r = modulus(&modinv_mul, &q);
-  r
+  result
 }
 // Implements Fermat's Little Theorem for modular inverse
 // For prime p, a⁻¹ ≡ aᵖ⁻² (mod p)
@@ -128,8 +107,6 @@ pub fn fermat_inverse(a: &BigInt, p: &BigInt) -> BigInt {
   let exp = p - BigInt::from(2); // p - 2
   a.modpow(&exp, p) // Compute a^(p-2) mod p
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -151,11 +128,11 @@ mod tests {
       // with only any 3 shares, we'll be able to reconstrcut the original secret
       let shares = create(3, 6, &q, &s);
       println!("shares: {:?}", shares);
-
-      let mut shares_to_use: Vec<[BigInt; 2]> = Vec::new();
-      shares_to_use.push(shares[2].clone());
-      shares_to_use.push(shares[1].clone());
-      shares_to_use.push(shares[0].clone());
+      let shares_to_use = vec![
+          shares[2].clone(),
+          shares[1].clone(),
+          shares[0].clone()
+      ];
       let r = lagrange_interpolation(&q, shares_to_use);
       println!("recovered secret: {:?}", r.to_string());
       println!("original secret: {:?}", s.to_string());
